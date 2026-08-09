@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        One permission, one feature: the Apps screen and App Control enumerate
+        installed packages. Without this, package-visibility rules on API 30+
+        return only Bomb itself. Nothing else here is privileged — the app reads
+        RAM, battery, thermal status and its own frame rate through public APIs
+        and reports everything else as unavailable.
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <!--
+        The stats overlay draws over other apps. This is a special permission:
+        it is never granted by a runtime dialog, only by the user toggling it in
+        Settings, so the Monitor screen sends them there and re-checks on return.
+        Declared here rather than assumed — without it the overlay could never
+        appear on any device, however many switches the UI offered.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!--
+        Privileged permissions. Declared here and granted only when Bomb is
+        installed to priv-app AND listed in
+        permissions/privapp-permissions-com.hzzmonet.zkbomb.xml.
+
+        Declaring them matters even on an ordinary install: checkSelfPermission
+        returns DENIED for a permission the manifest never asked for, so without
+        these lines CapabilityProbe would report REQUIRES_ROOT forever — even
+        after the ROM granted them. An ordinary install still gets nothing; the
+        platform simply ignores a privileged request it will not honour.
+
+        Each one is here because a specific implemented feature needs it. Adding
+        a permission "while we're at it" is what turns a reviewed allowlist into
+        a blanket grant.
+    -->
+    <!-- Force stop precedes disable: disabling does not stop a running process. -->
+    <uses-permission android:name="android.permission.FORCE_STOP_PACKAGES"
+        tools:ignore="ProtectedPermissions" />
+    <!-- DEEP_FREEZE's preferred mechanism (D8) — keeps the package queryable. -->
+    <uses-permission android:name="android.permission.SUSPEND_APPS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- FreezeMode.DISABLED, and component-level control. -->
+    <uses-permission android:name="android.permission.CHANGE_COMPONENT_ENABLED_STATE"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Global process/PSS visibility for the implemented Task Manager backend. -->
+    <uses-permission android:name="android.permission.REAL_GET_TASKS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Runtime permission. Bomb Bridge's floor renderer is an ordinary
+         notification; it is requested from the UI, not granted by placement. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+        Call recording. RECORD_AUDIO is an ordinary runtime permission, requested
+        from the recorder screen. The two CAPTURE_* permissions are privileged
+        (signature|privileged): they are what let the playback-capture path pull
+        the remote party's voice, and they are granted only when Bomb is a system
+        app AND allowlisted in privapp-permissions-com.hzzmonet.zkbomb.xml. On an
+        ordinary install they stay denied and the probe reports the feature
+        unsupported — capture never silently half-works.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.CAPTURE_VOICE_COMMUNICATION_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+        Foreground-service plumbing for the recorder. The service runs as type
+        mediaProjection|microphone; Android 14+ requires both the type-specific
+        FOREGROUND_SERVICE_* permissions and that the service be foreground before
+        the projection is obtained (handled in CallRecordingService.handleEnable).
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!--
+        Foreground-app attribution for automatic detection: it is how Bomb tells
+        which watched app is in a call. A special access, granted per app in
+        Settings, never by a dialog. Without it automatic mode stays in standby
+        rather than recording an unattributed call.
+    -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Bomb">
+
+        <activity
+            android:name="com.hzzmonet.zkbomb.preview.MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density|smallestScreenSize"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Bomb">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            The call recorder's runtime. The implementation lives in :preview
+            (androidMain) and is declared here because the foreground-service type
+            must be pinned in the packaged APK's manifest. exported="false" — it is
+            commanded only from inside Bomb, via typed Intents from the recorder UI.
+        -->
+        <service
+            android:name="com.hzzmonet.zkbomb.recorder.CallRecordingService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|microphone" />
+    </application>
+
+</manifest>

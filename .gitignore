@@ -1,14 +1,7 @@
-# Bỏ qua tất cả các tập tin và thư mục theo mặc định
-/*
-
-# Theo dõi tập tin .gitignore
-!.gitignore
-
-# Chỉ theo dõi các tập tin chỉ định
-!bomb.sh
-!build.sh
-!root.sh
-
-# Chỉ theo dõi các thư mục chỉ định
-!tools/
-!mods/
+build/
+.gradle/
+local.properties
+.kotlin/
+.idea/
+*.iml
+.DS_Store

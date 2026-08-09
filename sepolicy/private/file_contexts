@@ -1,0 +1,5 @@
+# APK files retain the standard system_file label. Process transition is selected
+# by seapp_contexts, not by inventing an executable entrypoint for an APK.
+/system_ext/priv-app/Bomb(/.*)?    u:object_r:system_file:s0
+/system_ext/etc/init/bomb\.rc      u:object_r:system_file:s0
+/system_ext/bin/bombd              u:object_r:bombd_exec:s0

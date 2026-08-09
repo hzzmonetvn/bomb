@@ -1,0 +1,6 @@
+id=bomb_backend
+name=Bomb
+version=v0.6.0
+versionCode=6
+author=hzzmonet
+description=Bomb as a priv-app with its permission allowlist, plus the root backend. ROM mode is declared by ro.bomb.integrated=1 (legacy persist.sys.zk.bomb=1); capabilities stay probed. Three log tiers, live swappiness and page-cluster. The app now shows its own version, so an installed build can be identified. Try: bombctl perms, bombctl rom-mode on.

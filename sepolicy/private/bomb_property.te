@@ -1,0 +1,5 @@
+# System-owned properties. Keep command/request and status types separate so a
+# compromised app process cannot forge "applied" state or disable the SELinux
+# bring-up guard.
+system_internal_prop(bomb_control_prop)
+system_internal_prop(bomb_status_prop)

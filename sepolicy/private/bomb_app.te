@@ -1,0 +1,31 @@
+# Bomb is a ROM-owned priv-app with a dedicated domain. app_domain supplies the
+# normal Android app baseline; rules below add only Bomb's typed control plane.
+type bomb_app, domain;
+app_domain(bomb_app)
+typeattribute bomb_app coredomain;
+
+# The app may request a bounded operation over bombd. It has no property_service,
+# sysfs or shell permission; only init/bombd may write control/status properties.
+get_prop(bomb_app, bomb_status_prop)
+allow bomb_app bombd_socket:sock_file write;
+allow bomb_app bombd:unix_stream_socket connectto;
+
+# Read-only telemetry needed to validate and verify typed memory requests. The
+# app still cannot write procfs, sysfs or cgroups; init owns every write.
+allow bomb_app proc_page_cluster:file { read getattr open };
+allow bomb_app proc:dir search;
+allow bomb_app sysfs:dir search;
+allow bomb_app sysfs_zram:dir { read getattr open search };
+allow bomb_app sysfs_zram:file { read getattr open };
+allow bomb_app cgroup:dir { read getattr open search };
+allow bomb_app cgroup:file { read getattr open };
+
+# /proc/sys/vm/swappiness is otherwise generic `proc`. coredomain has a
+# neverallow against opening generic proc files, so label this exact node rather
+# than weakening that boundary for the whole app domain.
+type bomb_memory_proc, fs_type, proc_type;
+genfscon proc /sys/vm/swappiness u:object_r:bomb_memory_proc:s0
+allow bomb_app bomb_memory_proc:file { read getattr open };
+allow bomb_app proc_stat:file { read getattr open };
+allow init bomb_memory_proc:file { write lock append map open };
+allow vendor_init bomb_memory_proc:file { write lock append map open };

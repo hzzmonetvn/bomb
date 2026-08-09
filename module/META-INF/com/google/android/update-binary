@@ -1,0 +1,30 @@
+#!/sbin/sh
+#
+# Magisk / KernelSU module installer stub.
+#
+# Does nothing itself: it loads the manager's own util_functions.sh and hands
+# over to install_module, which is what unpacks the zip, runs customize.sh and
+# sets permissions. Written to the documented contract rather than carrying a
+# vendored copy of the manager's installer, so it cannot drift from it.
+
+umask 022
+ui_print() { echo "$1"; }
+
+require_new_magisk() {
+  ui_print "*******************************"
+  ui_print " Needs Magisk v20.4+ or KernelSU"
+  ui_print "*******************************"
+  exit 1
+}
+
+OUTFD=$2
+ZIPFILE=$3
+
+mount /data 2>/dev/null
+
+[ -f /data/adb/magisk/util_functions.sh ] || require_new_magisk
+. /data/adb/magisk/util_functions.sh
+[ "$MAGISK_VER_CODE" -lt 20400 ] && require_new_magisk
+
+install_module
+exit 0

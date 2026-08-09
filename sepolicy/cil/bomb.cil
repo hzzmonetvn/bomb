@@ -1,0 +1,134 @@
+; Bomb SELinux policy, in CIL.
+;
+; Why CIL and not the .te files in ../private:
+;   Those are .te syntax with AOSP macros (app_domain, init_daemon_domain,
+;   set_prop). Expanding them needs m4 plus the AOSP te_macros and an AOSP tree,
+;   which this workspace does not have. The ROM's own system_ext_sepolicy.cil is
+;   already normalised CIL, so this file is what actually gets appended and
+;   compiled. ../private stays as the readable statement of intent; this is the
+;   artifact.
+;
+; The app-domain baseline below was derived from `wae_app` in this ROM's own
+; system_ext_sepolicy.cil — a HyperOS app domain that already compiles against
+; this exact policy — rather than written from AOSP macros. Three rules that
+; wae_app carries were deliberately dropped:
+;
+;   (allow wae_app system_prop (property_service (set)))
+;   (allow wae_app property_socket (sock_file (write)))
+;   (allow wae_app init (unix_stream_socket (connectto)))
+;
+; Those let an app write system properties. Bomb's entire design rests on the app
+; not being able to: it sends a bounded command to bombd, and bombd owns the
+; property namespace. Inheriting them would have made the daemon decorative.
+;
+; Verified by compiling the whole ROM policy with this file appended — see
+; docs/ROM_INTEGRATION.md §3.
+
+; ---------------------------------------------------------------- types
+
+(type bomb_app)
+(roletype object_r bomb_app)
+(typeattributeset domain (bomb_app))
+(typeattributeset coredomain (bomb_app))
+(typeattributeset appdomain (bomb_app))
+
+(type bombd)
+(roletype object_r bombd)
+(typeattributeset domain (bombd))
+(typeattributeset coredomain (bombd))
+
+(type bombd_exec)
+(typeattributeset file_type (bombd_exec))
+(typeattributeset exec_type (bombd_exec))
+(typeattributeset system_file_type (bombd_exec))
+
+(type bombd_socket)
+(typeattributeset file_type (bombd_socket))
+
+; Command and status are separate types on purpose. A compromised app process
+; must not be able to forge "applied" state or clear the SELinux bring-up guard,
+; and it cannot: it holds no property_service permission on either.
+(type bomb_control_prop)
+(typeattributeset property_type (bomb_control_prop))
+(type bomb_status_prop)
+(typeattributeset property_type (bomb_status_prop))
+(type bomb_memory_proc)
+(roletype object_r bomb_memory_proc)
+(typeattributeset fs_type (bomb_memory_proc))
+(typeattributeset proc_type (bomb_memory_proc))
+(genfscon proc "/sys/vm/swappiness" (u object_r bomb_memory_proc ((s0) (s0))))
+
+; ---------------------------------------------------------------- app baseline
+
+(typetransition bomb_app tmpfs file appdomain_tmpfs)
+(allow bomb_app appdomain_tmpfs (file (ioctl read write getattr map execute)))
+(allowx bomb_app appdomain_tmpfs (ioctl file ((range 0x7701 0x770b))))
+(allow bomb_app app_data_file (dir (ioctl read write getattr lock open watch watch_reads add_name remove_name search)))
+(allow bomb_app app_data_file (file (ioctl read write getattr lock append map execute open watch watch_reads execute_no_trans)))
+(allow bomb_app app_data_file (lnk_file (ioctl read write create getattr setattr lock append map unlink rename open watch watch_reads)))
+(allow bomb_app app_data_file (sock_file (ioctl read write create getattr setattr lock append map unlink rename open watch watch_reads)))
+(allow bomb_app app_data_file (fifo_file (ioctl read write create getattr setattr lock append map unlink rename open watch watch_reads)))
+(allow bomb_app privapp_data_file (lnk_file (ioctl read getattr lock map open watch watch_reads)))
+(allow bomb_app system_app_data_file (file (read write getattr)))
+(allow bomb_app system_linker_exec (file (execute_no_trans)))
+(allow bomb_app tmpfs (file (ioctl read write create getattr setattr lock append map unlink rename open watch watch_reads)))
+(allow bomb_app tmpfs (sock_file (write create)))
+(allow bomb_app self (process (ptrace)))
+(allow bomb_app servicemanager (service_manager (list)))
+(allow bomb_app servicemanager (binder (call transfer)))
+(allow bomb_app app_api_service (service_manager (find)))
+(allow bomb_app system_app_service (service_manager (find)))
+
+; ---------------------------------------------------------------- Bomb's edge
+;
+; The whole privileged surface of the app domain. One socket, one direction.
+
+(allow bomb_app socket_device (dir (search)))
+(allow bomb_app bombd_socket (sock_file (write getattr)))
+(allow bomb_app bombd (unix_stream_socket (connectto)))
+
+; Read-only. The app observes what init applied; it can set nothing.
+(allow bomb_app bomb_status_prop (file (read getattr map open)))
+(allow bomb_app bomb_control_prop (file (read getattr map open)))
+
+; Read-only telemetry used for capability probing and post-apply verification.
+; No procfs, sysfs or cgroup write permission is granted to the app domain.
+(allow bomb_app bomb_memory_proc (file (read getattr open)))
+(allow bomb_app proc_stat (file (read getattr open)))
+(allow bomb_app proc_page_cluster (file (read getattr open)))
+(allow bomb_app proc (dir (search)))
+(allow bomb_app sysfs (dir (search)))
+(allow bomb_app sysfs_zram (dir (read getattr open search)))
+(allow bomb_app sysfs_zram (file (read getattr open)))
+(allow bomb_app cgroup (dir (read getattr open search)))
+(allow bomb_app cgroup (file (read getattr open)))
+(allow init bomb_memory_proc (file (write lock append map open)))
+(allow vendor_init bomb_memory_proc (file (write lock append map open)))
+
+; ---------------------------------------------------------------- bombd
+;
+; init → bombd transition, patterned on this ROM's own `mcd` daemon.
+
+(allow init bombd (process (transition)))
+(allow bombd bombd_exec (file (read getattr map execute open entrypoint)))
+(dontaudit init bombd (process (noatsecure)))
+(allow init bombd (process (siginh rlimitinh)))
+(typetransition init bombd_exec process bombd)
+
+; The socket is created by init and handed over as a file descriptor; bombd
+; accepts on it. getopt is what carries SO_PEERCRED and SO_PEERSEC, which is how
+; the peer is identified — see native/bombd/bombd.c.
+(allow bombd bombd_socket (sock_file (write getattr)))
+(allow bombd bomb_app (unix_stream_socket (accept read write getattr getopt)))
+
+; The only properties bombd may write, and it may write nothing else.
+(allow bombd bomb_control_prop (property_service (set)))
+(allow bombd bomb_control_prop (file (read getattr map open)))
+(allow bombd bomb_status_prop (file (read getattr map open)))
+(allow bombd property_socket (sock_file (write)))
+(allow bombd init (unix_stream_socket (connectto)))
+
+; Deliberately absent: any /proc access. bombd used to read /proc/<pid>/cmdline
+; to identify its peer, which could never have worked — procfs pid inodes carry
+; the task's own context, so it would have needed bomb_app:file read. SO_PEERSEC
+; answers the same question from the socket and needs no file permission at all.

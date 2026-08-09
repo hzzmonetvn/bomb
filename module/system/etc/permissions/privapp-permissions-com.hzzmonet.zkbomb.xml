@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Privileged permission allowlist for Bomb.
+
+    Install to: /system/etc/permissions/  (or /product/etc/permissions/,
+    matching the partition the APK is placed in — the allowlist must live on the
+    same partition as the priv-app it describes, or the platform will not apply
+    it.)
+
+    Without this file, placing Bomb in priv-app grants nothing: priv-app
+    placement makes a permission *eligible*, and this file is what actually
+    grants it. That distinction is the reason ROM integration is not simply
+    "copy the APK in".
+
+    ## Review rules
+
+    Every entry names the feature that needs it. A permission with no implemented
+    feature behind it does not belong here, however plausible it looks — the
+    whole value of an allowlist is that someone had to justify each line.
+
+    When `ro.control_privapp_permissions` is `log` or unset (which some HyperOS
+    builds do), an over-broad grant produces no error and no denial, so a mistake
+    here is silent. Hand review is the only check that runs.
+-->
+<permissions>
+    <privapp-permissions package="com.hzzmonet.zkbomb">
+
+        <!--
+            Force stop, which must precede disabling a package: disabling does
+            not stop a process that is already running.
+            docs/BOMB_PLAN.md §4.3
+        -->
+        <permission name="android.permission.FORCE_STOP_PACKAGES" />
+
+        <!--
+            setPackagesSuspended — DEEP_FREEZE's preferred mechanism per D8. A
+            suspended package stays queryable and attributable; a hidden one
+            behaves as uninstalled and breaks other apps' queries.
+        -->
+        <permission name="android.permission.SUSPEND_APPS" />
+
+        <!--
+            setApplicationEnabledSetting and per-component enabled state —
+            FreezeMode.DISABLED and Component Explorer.
+            docs/BOMB_PLAN.md §4.3, §4.4
+        -->
+        <permission name="android.permission.CHANGE_COMPONENT_ENABLED_STATE" />
+
+        <!-- VoIP playback capture; runtime RECORD_AUDIO remains user-granted. -->
+        <permission name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+        <permission name="android.permission.CAPTURE_VOICE_COMMUNICATION_OUTPUT" />
+
+        <!-- Foreground attribution shared by VoIP detection and Task Manager. -->
+        <permission name="android.permission.PACKAGE_USAGE_STATS" />
+
+        <!-- Bounded ActivityManager process/PSS snapshots for Task Manager. -->
+        <permission name="android.permission.REAL_GET_TASKS" />
+
+    </privapp-permissions>
+</permissions>
+
+<!--
+    ## Deliberately absent, and why
+
+    android.permission.MANAGE_USERS
+        Would enable setApplicationHiddenSettingAsUser, the HIDE fallback for
+        DEEP_FREEZE. Left out: D8 already prefers suspend, so HIDE is a fallback
+        for a case that has not been shown to occur, and MANAGE_USERS is far
+        broader than that one call. FreezeMechanism.HIDE therefore probes as
+        unsupported, which is the honest result rather than a hidden capability.
+
+    android.permission.INTERACT_ACROSS_USERS
+        The AIDL carries a userId, but every implemented path operates on the
+        calling user. Granting cross-user access before anything uses it would be
+        privilege with no feature behind it.
+
+    android.permission.DUMP
+        No generic dump API is exposed. REAL_GET_TASKS is granted only for the
+        bounded typed Task Manager backend.
+
+    android.permission.CONTROL_INCALL_EXPERIENCE
+        Cellular call recording is still absent. VoIP uses the two CAPTURE_*
+        permissions granted above and a real non-silent capture probe.
+
+    android.permission.WRITE_SECURE_SETTINGS
+        Nothing implemented needs it. It is the single most over-granted
+        permission in toolbox apps and is exactly the kind of "might be useful"
+        entry this list exists to keep out.
+-->

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<config>
+    <!-- BombCoreService uses the hidden SystemProperties getter for observed
+         status. Writes go only through bombd's fixed protocol. -->
+    <hidden-api-whitelisted-app package="com.hzzmonet.zkbomb" />
+</config>

@@ -1,0 +1,228 @@
+#!/system/bin/sh
+#
+# bombctl — the user-facing side of the Bomb root backend.
+#
+# Deliberately a small set of named verbs over validated arguments, not a way to
+# run commands. There is no `bombctl exec`, no `bombctl setprop`, and no verb
+# that takes a filesystem path: the same rule the Binder API follows, for the
+# same reason — a generic escape hatch would make every other control here
+# decorative.
+
+MODDIR=/data/adb/modules/bomb_backend
+. "$MODDIR/common.sh" 2>/dev/null || {
+    echo "bombctl: cannot load $MODDIR/common.sh — is the module installed?"
+    exit 1
+}
+
+require_root() {
+    [ "$(id -u)" = "0" ] || {
+        echo "bombctl: needs root"
+        exit 1
+    }
+}
+
+# awk rather than shell arithmetic: these are ratios, and shell has no floats.
+# A zero denominator prints "unavailable" instead of a number — on a fresh zram
+# nothing has been swapped yet, and printing "inf" or "0.00" would both be
+# inventing a measurement.
+ratio() {
+    awk -v n="$1" -v d="$2" 'BEGIN { if (d + 0 == 0) print "unavailable"; else printf "%.2fx", n / d }'
+}
+
+human() {
+    awk -v b="$1" 'BEGIN {
+        if (b + 0 == 0) { print "0 B"; exit }
+        split("B KB MB GB TB", u, " ");
+        i = 1; while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        printf "%.2f %s", b, u[i]
+    }'
+}
+
+cmd_status() {
+    echo "Bomb root backend"
+    echo
+
+    echo "Logging"
+    echo "  declared tier   : $(declared_level)"
+    echo "  effective tier  : $(effective_level)"
+    if [ "$(declared_level)" != "$(effective_level)" ]; then
+        echo "  ! declared and effective disagree — a transition was interrupted."
+        echo "    Run: bombctl log $(declared_level)   (or reboot to reconcile)"
+    fi
+    echo "  logd            : $(svc_state logd)"
+    echo "  logcatd         : $(svc_state logcatd)"
+    echo "  traced          : $(svc_state traced)"
+    echo "  traced_probes   : $(svc_state traced_probes)"
+    echo "  buffer size     : $(prop_get persist.logd.size)"
+    _rate="$(prop_get persist.logd.audit.rate)"
+    echo "  SELinux denial cap: ${_rate:-platform default (5/sec)}"
+    if ylog_present; then
+        echo "  ! /dev/ylog_buffer exists — MIUI still logs there at every tier."
+        echo "    No tier here touches it, so this is NOT 'logging fully off'."
+    fi
+    [ -f "$SNAPSHOT" ] && echo "  original values : captured" || echo "  original values : not yet captured"
+    echo
+
+    echo "Memory"
+    if [ -d /sys/block/zram0 ]; then
+        _orig=$(cat /sys/block/zram0/mm_stat 2>/dev/null | awk '{print $1}')
+        _compr=$(cat /sys/block/zram0/mm_stat 2>/dev/null | awk '{print $2}')
+        _used=$(cat /sys/block/zram0/mm_stat 2>/dev/null | awk '{print $3}')
+        _disk=$(cat /sys/block/zram0/disksize 2>/dev/null)
+        echo "  zram disksize   : $(human "${_disk:-0}")"
+        echo "  data stored     : $(human "${_orig:-0}") uncompressed"
+        echo "  compressed to   : $(human "${_compr:-0}")"
+        echo "  RAM in use      : $(human "${_used:-0}")"
+        echo "  compression     : $(ratio "${_orig:-0}" "${_compr:-0}")"
+        # Always lower than the compression ratio, because of allocator
+        # overhead. It is the figure that reflects real RAM saved, so it is the
+        # one to trust.
+        echo "  RAM efficiency  : $(ratio "${_orig:-0}" "${_used:-0}")"
+        echo "  algorithm       : $(cat /sys/block/zram0/comp_algorithm 2>/dev/null)"
+    else
+        echo "  zram            : not present on this device"
+    fi
+    echo "  swappiness:"
+    for _t in $SWAPPINESS_TARGETS; do
+        [ -r "$_t" ] || continue
+        printf '    %-42s %s\n' "$_t" "$(cat "$_t" 2>/dev/null)"
+    done
+    echo "    /dev/memcg/sys_critical/...  $(cat /dev/memcg/sys_critical/memory.swappiness 2>/dev/null || echo n/a)  (never written by Bomb)"
+    echo "  page-cluster    : $(cat /proc/sys/vm/page-cluster 2>/dev/null || echo n/a)"
+}
+
+# Shows whether the privileged permissions were actually granted.
+#
+# This calls `dumpsys package` on one fixed package name. That is a specific
+# diagnostic with no caller-supplied input — not the arbitrary-exec hatch the
+# rest of this design rules out, and the distinction is the whole point: a named
+# command with fixed arguments is auditable, `bombctl exec "$@"` is not.
+cmd_perms() {
+    PKG=com.hzzmonet.zkbomb
+    echo "Privileged permissions for $PKG"
+    echo
+
+    _path=$(pm path "$PKG" 2>/dev/null | head -n 1 | cut -d: -f2-)
+    if [ -z "$_path" ]; then
+        echo "  ! not installed"
+        return 1
+    fi
+    echo "  apk : $_path"
+    case "$_path" in
+        /system/priv-app/*|/product/priv-app/*|/system_ext/priv-app/*)
+            echo "  slot: priv-app  (privileged permissions are eligible)" ;;
+        /data/app/*)
+            echo "  slot: /data/app — a sideloaded copy is shadowing the system one."
+            echo "        Privileged permissions will NOT be granted."
+            echo "        Fix: pm uninstall --user 0 $PKG   then reboot" ;;
+        *)
+            echo "  slot: $_path — not a priv-app location" ;;
+    esac
+    echo
+
+    echo "  enforcement: ro.control_privapp_permissions='$(getprop ro.control_privapp_permissions)'"
+    if [ -z "$(getprop ro.control_privapp_permissions)" ]; then
+        echo "    (empty — the allowlist is not enforced on this ROM, so a"
+        echo "     priv-app receives what its manifest asks for. The XML still"
+        echo "     ships: a ROM update can turn enforcement on, and the file is"
+        echo "     the record of what was meant to be granted.)"
+    fi
+    echo
+
+    echo "  granted:"
+    for p in FORCE_STOP_PACKAGES SUSPEND_APPS CHANGE_COMPONENT_ENABLED_STATE; do
+        if dumpsys package "$PKG" 2>/dev/null | grep -q "android.permission.$p: granted=true"; then
+            printf '    %-34s GRANTED\n' "$p"
+        else
+            printf '    %-34s not granted\n' "$p"
+        fi
+    done
+    echo
+    echo "  allowlist file:"
+    for d in /system/etc/permissions /product/etc/permissions /system_ext/etc/permissions; do
+        [ -f "$d/privapp-permissions-$PKG.xml" ] && echo "    found: $d/privapp-permissions-$PKG.xml"
+    done
+}
+
+# Sets the ROM-mode marker.
+#
+# One fixed property, two accepted values — not a setprop passthrough. The value
+# is what the app reads to decide it is ROM-integrated, so a typo here would
+# silently leave the device in NORMAL mode; the command re-reads and reports.
+#
+# On a real ROM build this belongs in build.prop, not here. This exists so the
+# mode can be exercised before a ROM has been rebuilt.
+cmd_rom_mode() {
+    case "$1" in
+        on)  setprop persist.sys.zk.bomb 1 ;;
+        off) setprop persist.sys.zk.bomb 0 ;;
+        *)   echo "usage: bombctl rom-mode <on|off>"; return 2 ;;
+    esac
+    _now="$(getprop persist.sys.zk.bomb)"
+    echo "persist.sys.zk.bomb = '${_now}'"
+    if [ "$1" = "on" ] && [ "$_now" != "1" ]; then
+        echo "  ! The property did not stick. SELinux property contexts decide"
+        echo "    who may write persist.sys.zk.*; on a ROM that restricts it,"
+        echo "    this must be set in build.prop at build time instead."
+        return 1
+    fi
+    echo "  Force-stop Bomb and reopen it to re-probe."
+}
+
+cmd_help() {
+    cat <<'EOF'
+bombctl <command>
+
+  status                    show logging and memory state
+  perms                     is Bomb a priv-app, and what was granted?
+  rom-mode <on|off>         set persist.sys.zk.bomb for testing ROM mode
+  log <default|reduced|off> set the log tier
+  swappiness <0-200>        apply to every writable memcg target
+  page-cluster <0-6>        swap readahead exponent
+  restore                   put every captured value back
+
+Notes
+  'off' stops logd. SELinux denials become invisible while it is off, so
+  do not use it while validating new policy. Leaving 'off' needs a reboot.
+
+  zram disksize and comp_algorithm are NOT settable here. Both require
+  swapoff, which faults every swapped page back into RAM at once — on a
+  loaded phone that is an OOM storm or a multi-minute freeze.
+EOF
+}
+
+case "$1" in
+    status|"") cmd_status ;;
+    perms) cmd_perms ;;
+    rom-mode) require_root; cmd_rom_mode "$2" ;;
+    log)
+        require_root
+        [ -n "$2" ] || { echo "usage: bombctl log <default|reduced|off>"; exit 2; }
+        if [ "$2" = "off" ]; then
+            echo "Warning: 'off' stops logd. Crash logs, bugreports and SELinux"
+            echo "denials all stop with it. Leaving 'off' needs a reboot."
+            ylog_present && echo "Note: /dev/ylog_buffer will keep logging regardless."
+        fi
+        config_set level "$2"
+        set_log_level "$2"
+        ;;
+    swappiness)
+        require_root
+        [ -n "$2" ] || { echo "usage: bombctl swappiness <0-200>"; exit 2; }
+        config_set swappiness "$2"
+        set_swappiness "$2"
+        ;;
+    page-cluster)
+        require_root
+        [ -n "$2" ] || { echo "usage: bombctl page-cluster <0-6>"; exit 2; }
+        config_set page_cluster "$2"
+        set_page_cluster "$2"
+        ;;
+    restore)
+        require_root
+        config_set level default
+        set_log_level default
+        ;;
+    help|-h|--help) cmd_help ;;
+    *) echo "bombctl: unknown command '$1'"; cmd_help; exit 2 ;;
+esac

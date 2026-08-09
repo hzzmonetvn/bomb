@@ -1,0 +1,96 @@
+# Bomb ROM backend — typed property triggers only.
+#
+# The app cannot write properties. It sends bounded commands to bombd; bombd
+# owns only the Bomb request properties, while init owns every privileged
+# service/sysfs operation. There is no shell command, arbitrary property or path.
+
+# Mode 0666 is intentional: Android app UIDs do not share a Unix group, while
+# SELinux restricts connectto/write to the exact bomb_app domain. bombd also
+# verifies SO_PEERCRED and /proc/PID/cmdline before accepting a command.
+service bombd /system_ext/bin/bombd
+    class core
+    user system
+    group system
+    socket bombd stream 0666 root root u:object_r:bombd_socket:s0
+    restart_period 5
+
+# Reconcile the persistent declared tier after Android has finished booting.
+on property:sys.boot_completed=1 && property:persist.sys.bomb.log.level=reduced
+    setprop persist.sys.bomb.log.request reduced
+
+on property:sys.boot_completed=1 && property:persist.sys.bomb.log.level=off
+    setprop persist.sys.bomb.log.request off
+
+# DEFAULT: hand managed properties back to platform defaults and restart the
+# services Bomb may have stopped. logd-reinit is required for buffer-size reset.
+on property:persist.sys.bomb.log.request=default
+    setprop persist.logd.kernel ""
+    setprop persist.logd.statistics ""
+    setprop persist.logd.size ""
+    setprop persist.logd.limit ""
+    setprop logd.logpersistd.enable ""
+    setprop persist.traced.enable ""
+    setprop persist.traced_perf.enable ""
+    setprop persist.logd.audit.rate ""
+    start logd
+    start logd-reinit
+    start traced
+    start traced_probes
+    start logcatd
+    setprop persist.sys.bomb.log.level default
+    setprop persist.sys.bomb.log.request idle
+
+# REDUCED keeps logd and SELinux denials alive, but shrinks buffers and stops
+# persistent log capture plus Perfetto daemons.
+on property:persist.sys.bomb.log.request=reduced
+    setprop persist.logd.kernel false
+    setprop persist.logd.statistics false
+    setprop persist.logd.size 64K
+    setprop persist.logd.limit Off
+    setprop logd.logpersistd.enable false
+    setprop persist.traced.enable 0
+    setprop persist.traced_perf.enable 0
+    setprop persist.logd.audit.rate ${persist.sys.bomb.log.audit_rate:-5}
+    stop logcatd
+    stop traced
+    stop traced_probes
+    start logd-reinit
+    setprop persist.sys.bomb.log.level reduced
+    setprop persist.sys.bomb.log.request idle
+
+# OFF is intentionally available in integrated ROM mode without Magisk,
+# KernelSU, Shizuku or an adb/root session. The target image was verified to
+# have no repeating logd restarter and logd is not critical. Keep this action
+# disabled while bringing up SELinux policy, because stopping logd removes AVCs.
+on property:persist.sys.bomb.log.request=off && property:persist.sys.bomb.selinux_bringup=0
+    setprop persist.logd.kernel false
+    setprop persist.logd.statistics false
+    setprop persist.logd.size 64K
+    setprop persist.logd.limit Off
+    setprop logd.logpersistd.enable false
+    setprop persist.traced.enable 0
+    setprop persist.traced_perf.enable 0
+    setprop persist.logd.audit.rate ${persist.sys.bomb.log.audit_rate:-5}
+    stop logcatd
+    stop traced
+    stop traced_probes
+    stop logd-auditctl
+    setprop persist.sys.bomb.log.level off
+    setprop persist.sys.bomb.log.request idle
+    stop logd
+
+# Fail closed if someone requests OFF while policy bring-up is active.
+on property:persist.sys.bomb.log.request=off && property:persist.sys.bomb.selinux_bringup=1
+    setprop persist.sys.bomb.log.request idle
+
+# Live memory knobs. Values are range-validated by BombCoreService before they
+# can reach these fixed paths. sys_critical is deliberately never written.
+on property:persist.sys.bomb.memory.swappiness=*
+    write /proc/sys/vm/swappiness ${persist.sys.bomb.memory.swappiness}
+    write /dev/memcg/memory.swappiness ${persist.sys.bomb.memory.swappiness}
+    write /dev/memcg/freeze-app/memory.swappiness ${persist.sys.bomb.memory.swappiness}
+    write /dev/memcg/apps/memory.swappiness ${persist.sys.bomb.memory.swappiness}
+    write /dev/memcg/system/memory.swappiness ${persist.sys.bomb.memory.swappiness}
+
+on property:persist.sys.bomb.memory.page_cluster=*
+    write /proc/sys/vm/page-cluster ${persist.sys.bomb.memory.page_cluster}

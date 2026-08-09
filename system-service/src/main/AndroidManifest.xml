@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+            android:exported="false" — the service is reachable only from inside
+            Bomb's own package. CallerValidator enforces the same thing again at
+            the Binder level, on purpose: the manifest flag is what the platform
+            enforces, and the UID/signature check is what still holds if a future
+            change ever flips that flag or the service is reached through a path
+            the manifest does not cover.
+        -->
+        <service
+            android:name="com.hzzmonet.zkbomb.core.BombCoreService"
+            android:exported="false"
+            android:process=":core" />
+    </application>
+
+</manifest>

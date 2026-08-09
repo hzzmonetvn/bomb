@@ -1,0 +1,37 @@
+[versions]
+# MIUIX 0.8.8 is built against Kotlin 2.3.20 / Compose Multiplatform 1.10.3.
+# Consuming a KMP library requires matching (or newer) Kotlin metadata, so these
+# three versions move together — do not bump one alone.
+kotlin = "2.3.20"
+composeMultiplatform = "1.10.3"
+miuix = "0.8.8"
+agp = "9.3.0"
+activityCompose = "1.13.0"
+coreKtx = "1.19.0"
+# :domain is a pure-JVM module — no Android, no Compose. Its only job is to be
+# fast to test, so it gets JUnit and nothing else.
+coroutines = "1.10.1"
+junit = "4.13.2"
+
+[libraries]
+miuix = { group = "top.yukonga.miuix.kmp", name = "miuix", version.ref = "miuix" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-kmp-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+# :core-api is a plain Android library rather than a KMP one: it owns the AIDL
+# surface, and AIDL compilation is an Android-Gradle feature with no KMP variant.
+android-library = { id = "com.android.library", version.ref = "agp" }
+# There is deliberately no `org.jetbrains.kotlin.android` entry: AGP 9 provides
+# Kotlin support itself and fails the build if that plugin is applied.
+# @Parcelize — every model crossing the Binder boundary needs it.
+kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize", version.ref = "kotlin" }
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+jetbrains-compose = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }

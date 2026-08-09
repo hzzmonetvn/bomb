@@ -1,0 +1,2 @@
+# Exact package match; do not assign every priv-app to this domain.
+user=_app isPrivApp=true name=com.hzzmonet.zkbomb domain=bomb_app type=app_data_file levelFrom=all

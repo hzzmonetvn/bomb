@@ -1,0 +1,5 @@
+# Safe defaults. Change one marker to 1 only in the build that applies and tests
+# the matching framework patch described in README.md.
+ro.bomb.framework.visibility=0
+ro.bomb.framework.settings=0
+

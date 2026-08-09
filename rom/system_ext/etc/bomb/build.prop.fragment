@@ -1,0 +1,6 @@
+# Merge into system_ext/build.prop when assembling the ROM.
+ro.bomb.integrated=1
+persist.sys.bomb.log.level=default
+persist.sys.bomb.log.request=idle
+persist.sys.bomb.log.audit_rate=5
+persist.sys.bomb.selinux_bringup=0

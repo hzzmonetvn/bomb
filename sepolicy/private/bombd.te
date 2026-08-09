@@ -1,0 +1,16 @@
+type bombd, domain, coredomain;
+type bombd_exec, exec_type, file_type, system_file_type;
+type bombd_socket, file_type;
+
+init_daemon_domain(bombd)
+
+# getopt covers SO_PEERCRED and SO_PEERSEC, which is how the peer is identified.
+allow bombd bomb_app:unix_stream_socket { accept read write getattr getopt };
+
+# No /proc access. bombd used to read /proc/<pid>/cmdline to identify the peer,
+# which could never have worked here: procfs pid inodes carry the task's own
+# context, so it would have needed bomb_app:file read. SO_PEERSEC answers the
+# same question from the socket, so the permission is not needed at all.
+
+set_prop(bombd, bomb_control_prop)
+get_prop(bombd, bomb_status_prop)
