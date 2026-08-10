@@ -5,7 +5,10 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.Process
+import com.hzzmonet.zkbomb.api.AutomationRuleParcel
+import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot
 import com.hzzmonet.zkbomb.api.BombCapabilities
 import com.hzzmonet.zkbomb.api.BombCapability
 import com.hzzmonet.zkbomb.api.BombResult
@@ -26,6 +29,8 @@ import com.hzzmonet.zkbomb.api.SystemTelemetrySnapshot
 import com.hzzmonet.zkbomb.api.VisibilityCallerPolicyParcel
 import com.hzzmonet.zkbomb.domain.freeze.FreezeMode
 import com.hzzmonet.zkbomb.domain.freeze.PackageNameValidator
+import com.hzzmonet.zkbomb.domain.automation.AutomationRuleEngine
+import com.hzzmonet.zkbomb.domain.automation.ResolvedAutomationAction
 import com.hzzmonet.zkbomb.domain.log.LogLevel
 import com.hzzmonet.zkbomb.domain.log.LogProfile
 import com.hzzmonet.zkbomb.domain.log.LogTransitionPlanner
@@ -93,6 +98,62 @@ class BombCoreService : Service() {
 
     private val adBlockEngine by lazy { AdBlockEngine() }
 
+    // ---- Bomb Rules / Automation (contract version 8) ---------------------
+
+    private val automationRepository by lazy { SharedPreferencesAutomationRuleRepository(this) }
+
+    private val performanceProfileBackend by lazy {
+        PerformanceProfileBackend(
+            object : MemoryTuningPort {
+                override fun available(): Boolean =
+                    modeDetector.romDeclared() && controlWriter.available
+
+                override fun currentSwappiness(): Int? = zramReader.globalSwappiness()
+
+                override fun currentPageCluster(): Int? = zramReader.pageCluster()
+
+                override fun request(swappiness: Int, pageCluster: Int): Boolean =
+                    controlWriter.requestMemory(swappiness, pageCluster)
+
+                override fun waitBeforeVerification() {
+                    android.os.SystemClock.sleep(MEMORY_VERIFY_DELAY_MS)
+                }
+            },
+        )
+    }
+
+    private val automationExecutor by lazy {
+        BombAutomationActionExecutor(
+            freeze = object : FreezeActionPort {
+                override fun currentMode(packageName: String, userId: Int): FreezeMode? =
+                    freezeBackend.status(packageName, userId)?.mode?.let { name ->
+                        FreezeMode.entries.firstOrNull { it.name == name }
+                    }
+
+                override fun setMode(
+                    packageName: String,
+                    userId: Int,
+                    mode: FreezeMode,
+                ): BombResult = freezeBackend.setMode(packageName, userId, mode)
+            },
+            performance = performanceProfileBackend,
+        )
+    }
+
+    private val automationCoordinator by lazy {
+        val interactive = getSystemService(PowerManager::class.java)?.isInteractive != false
+        AutomationCoordinator(
+            repository = automationRepository,
+            engine = AutomationRuleEngine(),
+            executor = automationExecutor,
+            screenInitiallyOn = interactive,
+        )
+    }
+
+    private val automationSignals by lazy {
+        AutomationSignalSource(this, automationCoordinator::onEvent)
+    }
+
     // -----------------------------------------------------------------------
 
     private val callerPolicy by lazy {
@@ -103,6 +164,22 @@ class BombCoreService : Service() {
     }
 
     private val validator by lazy { CallerValidator(packageManager, callerPolicy) }
+
+    override fun onCreate() {
+        super.onCreate()
+        if (automationRepository.isEnabled()) startAutomationSignals()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (automationRepository.isEnabled()) startAutomationSignals()
+        return if (automationRepository.isEnabled()) START_STICKY else START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        automationSignals.stop()
+        automationCoordinator.setObserverRunning(false)
+        super.onDestroy()
+    }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -145,7 +222,14 @@ class BombCoreService : Service() {
             if (!modeDetector.romDeclared()) {
                 return BombResult.unsupported("Freeze needs the integrated ROM backend")
             }
-            return freezeBackend.setMode(packageName, userId, parsed)
+            return freezeBackend.setMode(packageName, userId, parsed).also { result ->
+                if (result.isSuccess) {
+                    automationCoordinator.recordManualAction(
+                        ResolvedAutomationAction.SetFreezeMode(packageName, userId, parsed),
+                        System.currentTimeMillis(),
+                    )
+                }
+            }
         }
 
         // ---- Log Governor --------------------------------------------------
@@ -534,6 +618,56 @@ class BombCoreService : Service() {
             return processTelemetry.selectedProcessMemory(pid)
         }
 
+        // ---- Bomb Rules / Automation (contract version 8) -----------------
+
+        override fun getAutomationRules(): AutomationRulesSnapshot {
+            if (!validator.isAllowed(Binder.getCallingUid())) {
+                return AutomationRulesSnapshot(
+                    enabled = false,
+                    observerRunning = false,
+                    rules = emptyList(),
+                    lastTrigger = null,
+                    lastTriggeredAtMillis = null,
+                )
+            }
+            return automationCoordinator.snapshot()
+        }
+
+        override fun upsertAutomationRule(rule: AutomationRuleParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (rule == null) return BombResult.invalidArgument("rule must not be null")
+            return automationCoordinator.upsert(rule)
+        }
+
+        override fun deleteAutomationRule(ruleId: String?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (ruleId == null) return BombResult.invalidArgument("ruleId")
+            return automationCoordinator.delete(ruleId)
+        }
+
+        override fun setAutomationEnabled(enabled: Boolean): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (!enabled) {
+                automationCoordinator.setEnabled(false)
+                automationSignals.stop()
+                automationCoordinator.setObserverRunning(false)
+                return BombResult.success()
+            }
+
+            automationCoordinator.setEnabled(true)
+            if (!startAutomationSignals()) {
+                automationCoordinator.setEnabled(false)
+                return BombResult.backendUnavailable("App/screen automation signal source is unavailable")
+            }
+            startService(Intent(this@BombCoreService, BombCoreService::class.java))
+            return BombResult.success()
+        }
+    }
+
+    private fun startAutomationSignals(): Boolean {
+        val started = automationSignals.start()
+        automationCoordinator.setObserverRunning(started)
+        return started
     }
 
     private fun executeFrameworkWrite(
@@ -602,8 +736,9 @@ class BombCoreService : Service() {
          * 6 — Phase 3: Visibility (§12), Settings Virtualization (§13),
          *     Firewall (§18), AdBlock reload (§16).
          * 7 — selected-process-only PSS/private-dirty memory sampling.
+         * 8 — Bomb Rules CRUD/status plus app/screen automation orchestration.
          */
-        const val API_VERSION = 7
+        const val API_VERSION = 8
         const val MEMORY_VERIFY_ATTEMPTS = 10
         const val MEMORY_VERIFY_DELAY_MS = 50L
         const val CONTROL_VERIFY_ATTEMPTS = 10

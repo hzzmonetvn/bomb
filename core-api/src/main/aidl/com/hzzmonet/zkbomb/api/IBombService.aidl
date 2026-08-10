@@ -1,5 +1,7 @@
 package com.hzzmonet.zkbomb.api;
 
+import com.hzzmonet.zkbomb.api.AutomationRuleParcel;
+import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot;
 import com.hzzmonet.zkbomb.api.BombCapabilities;
 import com.hzzmonet.zkbomb.api.BombResult;
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel;
@@ -307,4 +309,17 @@ interface IBombService {
      */
     SelectedProcessMemory getSelectedProcessMemory(int pid);
 
+    // ---- Appended in contract version 8 — Bomb Rules / Automation ----------
+
+    /** Current bounded rule set plus observer/runtime status. */
+    AutomationRulesSnapshot getAutomationRules();
+
+    /** Create or replace one validated rule. Rule ids are stable upsert keys. */
+    BombResult upsertAutomationRule(in AutomationRuleParcel rule);
+
+    /** Delete one rule and any pending restore owned by it. */
+    BombResult deleteAutomationRule(String ruleId);
+
+    /** Master switch. Disabling stops signal observation and clears runtime state. */
+    BombResult setAutomationEnabled(boolean enabled);
 }

@@ -151,6 +151,14 @@ class CapabilityProbe(
         )
         builder.set(BombCapability.PERFORMANCE_CONTROL, CapabilityState.REQUIRES_ROOT)
         builder.set(BombCapability.CHARGE_CONTROL, CapabilityState.NOT_PROBED)
+        builder.set(
+            BombCapability.AUTOMATION_RULES,
+            if (context.getSystemService(android.app.usage.UsageStatsManager::class.java) != null) {
+                CapabilityState.SUPPORTED
+            } else {
+                CapabilityState.UNSUPPORTED
+            },
+        )
 
         // ---- Logging ----------------------------------------------------------
         builder.set(

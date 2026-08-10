@@ -49,6 +49,8 @@ enum class BombCapability {
     PERFORMANCE_CONTROL,
     CHARGE_CONTROL,
     ZRAM_CONTROL,
+    /** Bomb Rules orchestration and its app/screen event source. */
+    AUTOMATION_RULES,
 
     // ---- Logging ----
     /** The `REDUCED` tier — needs a ROM-side init trigger. */
