@@ -14,6 +14,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import com.hzzmonet.zkbomb.api.AutomationActionParcel
+import com.hzzmonet.zkbomb.api.AutomationConditionParcel
+import com.hzzmonet.zkbomb.api.AutomationRuleParcel
+import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot
+import com.hzzmonet.zkbomb.api.BatteryLabProfileParcel
+import com.hzzmonet.zkbomb.api.BatteryLabSnapshot
 import com.hzzmonet.zkbomb.api.BombCapability
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel
 import com.hzzmonet.zkbomb.api.IBombService
@@ -324,6 +330,65 @@ private class AndroidBombServiceController(
     override fun reloadAdBlockRules(onResult: (BombOperationResult) -> Unit) =
         runV6Operation("adblock-reload", onResult) { service.reloadAdBlockRules() }
 
+    override fun getAutomationRules(onResult: (BombAutomationSnapshot?) -> Unit) =
+        runAsync("automation-rules", onFailure = null, onResult = onResult) {
+            if (apiVersion < MIN_AUTOMATION_VERSION) return@runAsync null
+            service.automationRules?.toCommon()
+        }
+
+    override fun upsertAutomationRule(rule: BombAutomationRule, onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_AUTOMATION_VERSION, "automation-upsert", onResult) {
+            service.upsertAutomationRule(rule.toParcel())
+        }
+
+    override fun deleteAutomationRule(ruleId: String, onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_AUTOMATION_VERSION, "automation-delete", onResult) {
+            service.deleteAutomationRule(ruleId)
+        }
+
+    override fun setAutomationEnabled(enabled: Boolean, onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_AUTOMATION_VERSION, "automation-enable", onResult) {
+            service.setAutomationEnabled(enabled)
+        }
+
+    override fun getBatteryLabSnapshot(onResult: (BombBatteryLabSnapshot?) -> Unit) =
+        runAsync("battery-lab", onFailure = null, onResult = onResult) {
+            if (apiVersion < MIN_BATTERY_LAB_VERSION) return@runAsync null
+            service.batteryLabSnapshot?.toCommon()
+        }
+
+    override fun setBatteryLabProfile(profile: BombBatteryLabProfile, onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_BATTERY_LAB_VERSION, "battery-set", onResult) {
+            service.setBatteryLabProfile(profile.toParcel())
+        }
+
+    override fun clearBatteryLabProfile(onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_BATTERY_LAB_VERSION, "battery-clear", onResult) {
+            service.clearBatteryLabProfile()
+        }
+
+    /**
+     * Run a write guarded on a minimum contract version: an older service does not
+     * have the transaction, so asking would land on nothing — return UNSUPPORTED
+     * instead of dispatching into the void.
+     */
+    private fun runGuardedOperation(
+        minVersion: Int,
+        name: String,
+        onResult: (BombOperationResult) -> Unit,
+        block: () -> com.hzzmonet.zkbomb.api.BombResult,
+    ) = runAsync(
+        name = name,
+        onFailure = BombOperationResult("BACKEND_UNAVAILABLE", "Binder call failed"),
+        onResult = onResult,
+    ) {
+        if (apiVersion < minVersion) {
+            BombOperationResult("UNSUPPORTED", "The connected service is older than v$minVersion")
+        } else {
+            block().let { BombOperationResult(it.status.name, it.detail) }
+        }
+    }
+
     /**
      * Run a v6 write, guarding the contract version the same way the v5/v7 calls
      * do: a service older than v6 does not have these transactions, so asking would
@@ -398,6 +463,12 @@ private class AndroidBombServiceController(
 
         // getSelectedProcessMemory was appended in v7.
         const val MIN_SELECTED_MEMORY_VERSION = 7
+
+        // Automation (getAutomationRules/upsert/delete/setEnabled) was appended in v8.
+        const val MIN_AUTOMATION_VERSION = 8
+
+        // Battery Lab (getBatteryLabSnapshot/set/clear) was appended in v9.
+        const val MIN_BATTERY_LAB_VERSION = 9
     }
 }
 
@@ -485,6 +556,92 @@ private fun com.hzzmonet.zkbomb.api.SystemTelemetrySnapshot.toCommon(): BombSyst
         totalRxBytes = totalRxBytes,
         totalTxBytes = totalTxBytes,
     )
+
+private fun AutomationConditionParcel.toCommon(): BombAutomationCondition =
+    BombAutomationCondition(type = type, value = value)
+
+private fun AutomationActionParcel.toCommon(): BombAutomationAction =
+    BombAutomationAction(type = type, value = value, packageName = packageName, userId = userId)
+
+private fun AutomationRuleParcel.toCommon(): BombAutomationRule = BombAutomationRule(
+    id = id,
+    name = name,
+    enabled = enabled,
+    trigger = trigger,
+    triggerPackageName = triggerPackageName,
+    conditions = conditions.map { it.toCommon() },
+    actions = actions.map { it.toCommon() },
+    scope = scope,
+    priority = priority,
+    cooldownMillis = cooldownMillis,
+    debounceMillis = debounceMillis,
+    restorePolicy = restorePolicy,
+)
+
+private fun AutomationRulesSnapshot.toCommon(): BombAutomationSnapshot = BombAutomationSnapshot(
+    enabled = enabled,
+    observerRunning = observerRunning,
+    rules = rules.map { it.toCommon() },
+    lastTrigger = lastTrigger,
+    lastTriggeredAtMillis = lastTriggeredAtMillis,
+)
+
+private fun BombAutomationCondition.toParcel(): AutomationConditionParcel =
+    AutomationConditionParcel(type = type, value = value)
+
+private fun BombAutomationAction.toParcel(): AutomationActionParcel =
+    AutomationActionParcel(type = type, value = value, packageName = packageName, userId = userId)
+
+private fun BombAutomationRule.toParcel(): AutomationRuleParcel = AutomationRuleParcel(
+    id = id,
+    name = name,
+    enabled = enabled,
+    trigger = trigger,
+    triggerPackageName = triggerPackageName,
+    conditions = conditions.map { it.toParcel() },
+    actions = actions.map { it.toParcel() },
+    scope = scope,
+    priority = priority,
+    cooldownMillis = cooldownMillis,
+    debounceMillis = debounceMillis,
+    restorePolicy = restorePolicy,
+)
+
+private fun BatteryLabProfileParcel.toCommon(): BombBatteryLabProfile = BombBatteryLabProfile(
+    chargeLimitPercent = chargeLimitPercent,
+    maxTemperatureDeciCelsius = maxTemperatureDeciCelsius,
+    capacityResumeHysteresisPercent = capacityResumeHysteresisPercent,
+    temperatureResumeHysteresisDeciCelsius = temperatureResumeHysteresisDeciCelsius,
+)
+
+private fun BombBatteryLabProfile.toParcel(): BatteryLabProfileParcel = BatteryLabProfileParcel(
+    chargeLimitPercent = chargeLimitPercent,
+    maxTemperatureDeciCelsius = maxTemperatureDeciCelsius,
+    capacityResumeHysteresisPercent = capacityResumeHysteresisPercent,
+    temperatureResumeHysteresisDeciCelsius = temperatureResumeHysteresisDeciCelsius,
+)
+
+private fun BatteryLabSnapshot.toCommon(): BombBatteryLabSnapshot = BombBatteryLabSnapshot(
+    sampledAtElapsedRealtimeMillis = sampledAtElapsedRealtimeMillis,
+    backendStatus = BombBatteryLabBackendStatus.fromName(backendStatus),
+    powerSupplyName = powerSupplyName,
+    status = status,
+    capacityPercent = capacityPercent,
+    temperatureDeciCelsius = temperatureDeciCelsius,
+    voltageMicrovolts = voltageMicrovolts,
+    currentMicroamps = currentMicroamps,
+    chargeCounterMicroampHours = chargeCounterMicroampHours,
+    cycleCount = cycleCount,
+    chargeFullMicroampHours = chargeFullMicroampHours,
+    chargeFullDesignMicroampHours = chargeFullDesignMicroampHours,
+    externalPowerPresent = externalPowerPresent,
+    chargeControlKind = chargeControlKind,
+    chargeLimitControlSupported = chargeLimitControlSupported,
+    thermalChargeControlSupported = thermalChargeControlSupported,
+    activeProfile = activeProfile?.toCommon(),
+    chargingSuspendedByBomb = chargingSuspendedByBomb,
+    lastDecisionReason = lastDecisionReason,
+)
 
 /**
  * Resolved by name rather than by class literal.

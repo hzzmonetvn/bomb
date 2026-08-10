@@ -9,6 +9,8 @@ import android.os.PowerManager
 import android.os.Process
 import com.hzzmonet.zkbomb.api.AutomationRuleParcel
 import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot
+import com.hzzmonet.zkbomb.api.BatteryLabProfileParcel
+import com.hzzmonet.zkbomb.api.BatteryLabSnapshot
 import com.hzzmonet.zkbomb.api.BombCapabilities
 import com.hzzmonet.zkbomb.api.BombCapability
 import com.hzzmonet.zkbomb.api.BombResult
@@ -40,6 +42,7 @@ import com.hzzmonet.zkbomb.domain.memory.ZramConfigValidator
 import com.hzzmonet.zkbomb.domain.model.CapabilityKey
 import com.hzzmonet.zkbomb.domain.settings.SettingsNamespace
 import com.hzzmonet.zkbomb.domain.validation.ApiV6InputValidator
+import java.util.concurrent.Executors
 
 /**
  * The bound service behind [IBombService].
@@ -55,9 +58,10 @@ import com.hzzmonet.zkbomb.domain.validation.ApiV6InputValidator
  * capability before the arguments would report "unsupported" for a request that
  * was malformed anyway.
  *
- * ROM-only writes cross the fixed bombd socket protocol. This app process never
- * receives property-service, sysfs or shell access; a sideloaded build simply
- * fails the daemon capability probe and reports the operation unsupported.
+ * Property writes cross the fixed bombd socket protocol. Device writes are
+ * isolated in typed, allowlisted backends and remain disabled unless the exact
+ * node is readable and writable under the installed policy. No Binder method
+ * accepts a property name, filesystem path or shell command.
  */
 class BombCoreService : Service() {
 
@@ -67,6 +71,7 @@ class BombCoreService : Service() {
     private val freezeBackend by lazy { FreezeBackend(this) }
     private val packageControl by lazy { PackageControlBackend(this, freezeBackend) }
     private val processTelemetry by lazy { ProcessTelemetryBackend(this) }
+    private val powerSupplyBackend by lazy { PowerSupplyBackend() }
     private val logReader by lazy { LogStateReader(properties) }
     private val modeDetector by lazy { RuntimeModeDetector(this, properties) }
     private val capabilityProbe by lazy {
@@ -79,6 +84,7 @@ class BombCoreService : Service() {
             freezeBackend,
             processTelemetry,
             packageControl,
+            powerSupplyBackend,
         )
     }
     private val logPlanner = LogTransitionPlanner()
@@ -154,6 +160,23 @@ class BombCoreService : Service() {
         AutomationSignalSource(this, automationCoordinator::onEvent)
     }
 
+    // ---- Thermal & Battery Lab (contract version 9) -----------------------
+
+    private val batteryLabStore by lazy { SharedPreferencesBatteryLabStateStore(this) }
+    private val batteryLabCoordinator by lazy {
+        BatteryLabCoordinator(powerSupplyBackend, batteryLabStore)
+    }
+    private val batteryLabExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "BombBatteryLab").apply { isDaemon = true }
+    }
+    private val batteryLabSignals by lazy {
+        BatteryLabSignalSource(this) {
+            runCatching {
+                batteryLabExecutor.execute { batteryLabCoordinator.evaluate() }
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
 
     private val callerPolicy by lazy {
@@ -168,16 +191,28 @@ class BombCoreService : Service() {
     override fun onCreate() {
         super.onCreate()
         if (automationRepository.isEnabled()) startAutomationSignals()
+        if (batteryLabCoordinator.hasActiveProfile()) {
+            startBatteryLabSignals()
+            batteryLabExecutor.execute { batteryLabCoordinator.resumeAtStartup() }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (automationRepository.isEnabled()) startAutomationSignals()
-        return if (automationRepository.isEnabled()) START_STICKY else START_NOT_STICKY
+        if (batteryLabCoordinator.hasActiveProfile()) startBatteryLabSignals()
+        return if (automationRepository.isEnabled() || batteryLabCoordinator.hasActiveProfile()) {
+            START_STICKY
+        } else {
+            START_NOT_STICKY
+        }
     }
 
     override fun onDestroy() {
         automationSignals.stop()
         automationCoordinator.setObserverRunning(false)
+        batteryLabSignals.stop()
+        batteryLabExecutor.execute { batteryLabCoordinator.pause() }
+        batteryLabExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -662,6 +697,41 @@ class BombCoreService : Service() {
             startService(Intent(this@BombCoreService, BombCoreService::class.java))
             return BombResult.success()
         }
+
+        // ---- Thermal & Battery Lab (contract version 9) -------------------
+
+        override fun getBatteryLabSnapshot(): BatteryLabSnapshot {
+            if (!validator.isAllowed(Binder.getCallingUid())) {
+                return BatteryLabSnapshot.unavailable(android.os.SystemClock.elapsedRealtime())
+            }
+            return batteryLabCoordinator.snapshot()
+        }
+
+        override fun setBatteryLabProfile(profile: BatteryLabProfileParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val parsed = profile?.toDomain()
+                ?: return BombResult.invalidArgument("profile")
+            val result = batteryLabCoordinator.setProfile(parsed)
+            if (!result.isSuccess) return result
+            if (!startBatteryLabSignals()) {
+                val rollback = batteryLabCoordinator.clear()
+                if (!rollback.isSuccess) {
+                    return BombResult.failed(
+                        "Battery signal setup failed and device state could not be restored",
+                    )
+                }
+                return BombResult.backendUnavailable("Battery change signal source is unavailable")
+            }
+            startService(Intent(this@BombCoreService, BombCoreService::class.java))
+            return BombResult.success()
+        }
+
+        override fun clearBatteryLabProfile(): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val result = batteryLabCoordinator.clear()
+            if (result.isSuccess) batteryLabSignals.stop()
+            return result
+        }
     }
 
     private fun startAutomationSignals(): Boolean {
@@ -669,6 +739,8 @@ class BombCoreService : Service() {
         automationCoordinator.setObserverRunning(started)
         return started
     }
+
+    private fun startBatteryLabSignals(): Boolean = batteryLabSignals.start()
 
     private fun executeFrameworkWrite(
         capability: BombCapability,
@@ -737,8 +809,9 @@ class BombCoreService : Service() {
          *     Firewall (§18), AdBlock reload (§16).
          * 7 — selected-process-only PSS/private-dirty memory sampling.
          * 8 — Bomb Rules CRUD/status plus app/screen automation orchestration.
+         * 9 — capability-probed Thermal Guardian and Battery Lab profiles.
          */
-        const val API_VERSION = 8
+        const val API_VERSION = 9
         const val MEMORY_VERIFY_ATTEMPTS = 10
         const val MEMORY_VERIFY_DELAY_MS = 50L
         const val CONTROL_VERIFY_ATTEMPTS = 10

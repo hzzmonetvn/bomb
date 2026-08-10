@@ -272,6 +272,166 @@ object BombSettingsValueType {
     const val NULL = "NULL"
 }
 
+// ---- Automation (contract v8) mirror types --------------------------------
+
+/** The event types the automation engine can trigger on, by name (v8). */
+object BombAutomationTrigger {
+    const val APP_FOREGROUND = "APP_FOREGROUND"
+    const val APP_BACKGROUND = "APP_BACKGROUND"
+    const val SCREEN_ON = "SCREEN_ON"
+    const val SCREEN_OFF = "SCREEN_OFF"
+    val ALL = listOf(APP_FOREGROUND, APP_BACKGROUND, SCREEN_ON, SCREEN_OFF)
+
+    /** True when a trigger is one of the app-scoped ones. */
+    fun isAppTrigger(trigger: String): Boolean = trigger == APP_FOREGROUND || trigger == APP_BACKGROUND
+}
+
+/** Rule precedence scope, by name (v8). */
+object BombRuleScope {
+    const val GLOBAL = "GLOBAL"
+    const val PER_APP = "PER_APP"
+    const val SAFETY = "SAFETY"
+}
+
+/** What to do on the opposite trigger, by name (v8). */
+object BombRestorePolicy {
+    const val NONE = "NONE"
+    const val ON_OPPOSITE_TRIGGER = "ON_OPPOSITE_TRIGGER"
+}
+
+/** Condition types, by name (v8). */
+object BombAutomationConditionType {
+    const val SCREEN_IS = "SCREEN_IS"
+    const val FOREGROUND_PACKAGE_IS = "FOREGROUND_PACKAGE_IS"
+    const val FOREGROUND_PACKAGE_IS_NOT = "FOREGROUND_PACKAGE_IS_NOT"
+}
+
+/** Action types, by name (v8). */
+object BombAutomationActionType {
+    const val SET_PERFORMANCE_PROFILE = "SET_PERFORMANCE_PROFILE"
+    const val SET_FREEZE_MODE = "SET_FREEZE_MODE"
+}
+
+/** Performance profiles an automation action can set, by name. */
+object BombPerformanceProfile {
+    val ALL = listOf("ECO", "BALANCED", "PERFORMANCE", "GAMING", "SUSTAINABLE", "CUSTOM")
+}
+
+/** Screen states for a SCREEN_IS condition, by name. */
+object BombScreenState {
+    const val ON = "ON"
+    const val OFF = "OFF"
+}
+
+/**
+ * Freeze modes an automation action may set, by name. DISABLED is deliberately
+ * absent: the engine rejects rules that would disable an application.
+ */
+object BombAutomationFreezeMode {
+    val ALL = listOf("NORMAL", "SOFT_FREEZE", "DEEP_FREEZE")
+}
+
+/** One condition of a rule, mirroring `core-api AutomationConditionParcel`. */
+data class BombAutomationCondition(val type: String, val value: String)
+
+/** One action of a rule, mirroring `core-api AutomationActionParcel`. */
+data class BombAutomationAction(
+    val type: String,
+    /** Profile or freeze-mode enum name, depending on [type]. */
+    val value: String,
+    val packageName: String?,
+    val userId: Int,
+)
+
+/** One Bomb Rule, mirroring `core-api AutomationRuleParcel`. */
+data class BombAutomationRule(
+    val id: String,
+    val name: String,
+    val enabled: Boolean,
+    val trigger: String,
+    val triggerPackageName: String?,
+    val conditions: List<BombAutomationCondition>,
+    val actions: List<BombAutomationAction>,
+    val scope: String,
+    val priority: Int,
+    val cooldownMillis: Long,
+    val debounceMillis: Long,
+    val restorePolicy: String,
+)
+
+/**
+ * The automation runtime snapshot, mirroring `core-api AutomationRulesSnapshot`.
+ * Unlike the v6 write-only surfaces this one is readable, so the UI shows the
+ * real current rule set, the master switch and the last trigger — no guessing.
+ */
+data class BombAutomationSnapshot(
+    val enabled: Boolean,
+    val observerRunning: Boolean,
+    val rules: List<BombAutomationRule>,
+    val lastTrigger: String?,
+    val lastTriggeredAtMillis: Long?,
+)
+
+// ---- Battery Lab (contract v9) mirror types -------------------------------
+
+/** Whether the Battery Lab backend answered at all. */
+enum class BombBatteryLabBackendStatus {
+    AVAILABLE,
+    UNSUPPORTED,
+    UNAVAILABLE,
+    ;
+
+    companion object {
+        fun fromName(name: String): BombBatteryLabBackendStatus =
+            entries.firstOrNull { it.name == name } ?: UNAVAILABLE
+    }
+}
+
+/** A charge/thermal policy, mirroring `core-api BatteryLabProfileParcel`. */
+data class BombBatteryLabProfile(
+    val chargeLimitPercent: Int?,
+    val maxTemperatureDeciCelsius: Int?,
+    val capacityResumeHysteresisPercent: Int,
+    val temperatureResumeHysteresisDeciCelsius: Int,
+)
+
+/**
+ * A `/sys/class/power_supply` snapshot, mirroring `core-api BatteryLabSnapshot`.
+ * Every metric the node did not expose stays null and renders "—", never a
+ * fabricated zero. [activeProfile] is the policy the backend reports as applied,
+ * so the profile console reads back what it set rather than assuming.
+ */
+data class BombBatteryLabSnapshot(
+    val sampledAtElapsedRealtimeMillis: Long,
+    val backendStatus: BombBatteryLabBackendStatus,
+    val powerSupplyName: String?,
+    val status: String?,
+    val capacityPercent: Int?,
+    val temperatureDeciCelsius: Int?,
+    val voltageMicrovolts: Long?,
+    val currentMicroamps: Long?,
+    val chargeCounterMicroampHours: Long?,
+    val cycleCount: Int?,
+    val chargeFullMicroampHours: Long?,
+    val chargeFullDesignMicroampHours: Long?,
+    val externalPowerPresent: Boolean?,
+    val chargeControlKind: String?,
+    val chargeLimitControlSupported: Boolean,
+    val thermalChargeControlSupported: Boolean,
+    val activeProfile: BombBatteryLabProfile?,
+    val chargingSuspendedByBomb: Boolean,
+    val lastDecisionReason: String?,
+) {
+    /** Battery wear health, if both charge-full counters are present. */
+    val healthPercent: Int?
+        get() {
+            val full = chargeFullMicroampHours ?: return null
+            val design = chargeFullDesignMicroampHours ?: return null
+            if (design <= 0) return null
+            return ((full * 100) / design).toInt()
+        }
+}
+
 /** UI-safe command surface; implementations dispatch Binder work off-main. */
 interface BombServiceController {
     fun getFreezeStatus(
@@ -422,6 +582,38 @@ interface BombServiceController {
      * is too small, UNSUPPORTED without the capability, SUCCESS otherwise (v6+).
      */
     fun reloadAdBlockRules(onResult: (BombOperationResult) -> Unit)
+
+    // ---- Automation (contract v8, AUTOMATION_RULES) ----
+
+    /**
+     * The current rule set, master switch and observer status, or null when the
+     * contract is older than v8 or the call fails. Readable — the UI shows real
+     * state rather than a composed guess (v8+).
+     */
+    fun getAutomationRules(onResult: (BombAutomationSnapshot?) -> Unit)
+
+    /** Create or replace one validated rule; the id is the stable upsert key (v8+). */
+    fun upsertAutomationRule(rule: BombAutomationRule, onResult: (BombOperationResult) -> Unit)
+
+    /** Delete one rule by id, plus any pending restore it owns (v8+). */
+    fun deleteAutomationRule(ruleId: String, onResult: (BombOperationResult) -> Unit)
+
+    /** Master switch; disabling stops observation and clears runtime state (v8+). */
+    fun setAutomationEnabled(enabled: Boolean, onResult: (BombOperationResult) -> Unit)
+
+    // ---- Battery Lab (contract v9, CHARGE_LIMIT_CONTROL / THERMAL_CHARGE_CONTROL) ----
+
+    /**
+     * A fresh capability-filtered power-supply snapshot including the active
+     * profile, or null when the contract is older than v9 or the call fails (v9+).
+     */
+    fun getBatteryLabSnapshot(onResult: (BombBatteryLabSnapshot?) -> Unit)
+
+    /** Persist and activate a bounded charge/thermal policy (v9+). */
+    fun setBatteryLabProfile(profile: BombBatteryLabProfile, onResult: (BombOperationResult) -> Unit)
+
+    /** Disable the policy and restore the control value Bomb captured (v9+). */
+    fun clearBatteryLabProfile(onResult: (BombOperationResult) -> Unit)
 }
 
 /**
@@ -454,7 +646,10 @@ object BombCapabilityKeys {
     const val PROXY_GATEWAY = "PROXY_GATEWAY"
     const val PERFORMANCE_CONTROL = "PERFORMANCE_CONTROL"
     const val CHARGE_CONTROL = "CHARGE_CONTROL"
+    const val CHARGE_LIMIT_CONTROL = "CHARGE_LIMIT_CONTROL"
+    const val THERMAL_CHARGE_CONTROL = "THERMAL_CHARGE_CONTROL"
     const val ZRAM_CONTROL = "ZRAM_CONTROL"
+    const val AUTOMATION_RULES = "AUTOMATION_RULES"
     const val LOG_REDUCE = "LOG_REDUCE"
     const val LOG_DISABLE = "LOG_DISABLE"
     const val HYPER_ISLAND_BRIDGE = "HYPER_ISLAND_BRIDGE"
@@ -476,7 +671,8 @@ object BombCapabilityKeys {
             PACKAGE_VISIBILITY_VIRTUALIZATION, SETTINGS_VIRTUALIZATION,
         ),
         "Network" to listOf(AD_BLOCK, DNS_CONTROL, FIREWALL, PROXY_GATEWAY),
-        "Device" to listOf(PERFORMANCE_CONTROL, CHARGE_CONTROL, ZRAM_CONTROL),
+        "Device" to listOf(PERFORMANCE_CONTROL, CHARGE_CONTROL, CHARGE_LIMIT_CONTROL, THERMAL_CHARGE_CONTROL, ZRAM_CONTROL),
+        "Automation" to listOf(AUTOMATION_RULES),
         "Logging" to listOf(LOG_REDUCE, LOG_DISABLE),
         "Bridge" to listOf(LIVE_UPDATE_BRIDGE, HYPER_ISLAND_BRIDGE),
         "Recording" to listOf(PHONE_RECORDING, VOIP_RECORDING),

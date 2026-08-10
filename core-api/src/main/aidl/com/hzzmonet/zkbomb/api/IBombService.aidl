@@ -2,6 +2,8 @@ package com.hzzmonet.zkbomb.api;
 
 import com.hzzmonet.zkbomb.api.AutomationRuleParcel;
 import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot;
+import com.hzzmonet.zkbomb.api.BatteryLabProfileParcel;
+import com.hzzmonet.zkbomb.api.BatteryLabSnapshot;
 import com.hzzmonet.zkbomb.api.BombCapabilities;
 import com.hzzmonet.zkbomb.api.BombResult;
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel;
@@ -322,4 +324,18 @@ interface IBombService {
 
     /** Master switch. Disabling stops signal observation and clears runtime state. */
     BombResult setAutomationEnabled(boolean enabled);
+
+    // ---- Appended in contract version 9 — Thermal & Battery Lab -----------
+
+    /** Fresh capability-filtered `/sys/class/power_supply` snapshot. */
+    BatteryLabSnapshot getBatteryLabSnapshot();
+
+    /**
+     * Persist and activate a bounded charge/thermal policy. The backend only
+     * uses allowlisted, capability-probed nodes; no path crosses Binder.
+     */
+    BombResult setBatteryLabProfile(in BatteryLabProfileParcel profile);
+
+    /** Disable the policy and restore only the control value Bomb captured. */
+    BombResult clearBatteryLabProfile();
 }

@@ -48,6 +48,10 @@ enum class BombCapability {
     // ---- Device control ----
     PERFORMANCE_CONTROL,
     CHARGE_CONTROL,
+    /** Capacity telemetry plus an allowlisted writable charging gate. */
+    CHARGE_LIMIT_CONTROL,
+    /** Battery temperature telemetry plus an allowlisted writable charging gate. */
+    THERMAL_CHARGE_CONTROL,
     ZRAM_CONTROL,
     /** Bomb Rules orchestration and its app/screen event source. */
     AUTOMATION_RULES,

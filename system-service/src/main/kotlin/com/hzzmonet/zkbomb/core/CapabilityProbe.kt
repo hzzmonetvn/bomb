@@ -30,6 +30,7 @@ class CapabilityProbe(
     private val freeze: FreezeBackend = FreezeBackend(context),
     private val processTelemetry: ProcessTelemetryBackend = ProcessTelemetryBackend(context),
     private val packageControl: PackageControlBackend = PackageControlBackend(context, freeze),
+    private val powerSupply: PowerSupplyBackend = PowerSupplyBackend(),
 ) {
 
     fun probe(): BombCapabilities {
@@ -150,7 +151,35 @@ class CapabilityProbe(
             },
         )
         builder.set(BombCapability.PERFORMANCE_CONTROL, CapabilityState.REQUIRES_ROOT)
-        builder.set(BombCapability.CHARGE_CONTROL, CapabilityState.NOT_PROBED)
+        val powerSupplyCapabilities = powerSupply.capabilities()
+        builder.set(
+            BombCapability.CHARGE_CONTROL,
+            when {
+                powerSupplyCapabilities.anyChargeControl -> CapabilityState.SUPPORTED
+                powerSupplyCapabilities.thresholdNodePresent ||
+                    powerSupplyCapabilities.gateNodePresent -> CapabilityState.REQUIRES_ROOT
+                else -> CapabilityState.UNSUPPORTED
+            },
+        )
+        builder.set(
+            BombCapability.CHARGE_LIMIT_CONTROL,
+            when {
+                powerSupplyCapabilities.chargeLimitControl -> CapabilityState.SUPPORTED
+                powerSupplyCapabilities.capacityTelemetry &&
+                    (powerSupplyCapabilities.thresholdNodePresent ||
+                        powerSupplyCapabilities.gateNodePresent) -> CapabilityState.REQUIRES_ROOT
+                else -> CapabilityState.UNSUPPORTED
+            },
+        )
+        builder.set(
+            BombCapability.THERMAL_CHARGE_CONTROL,
+            when {
+                powerSupplyCapabilities.thermalChargeControl -> CapabilityState.SUPPORTED
+                powerSupplyCapabilities.temperatureTelemetry &&
+                    powerSupplyCapabilities.gateNodePresent -> CapabilityState.REQUIRES_ROOT
+                else -> CapabilityState.UNSUPPORTED
+            },
+        )
         builder.set(
             BombCapability.AUTOMATION_RULES,
             if (context.getSystemService(android.app.usage.UsageStatsManager::class.java) != null) {
