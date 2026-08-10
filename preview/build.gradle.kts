@@ -13,6 +13,10 @@ kotlin {
         namespace = "com.hzzmonet.zkbomb.preview.ui"
         compileSdk = 37
         minSdk = 33
+        // Enables the JVM host unit-test compilation (androidHostTest), so the
+        // pure delta/state logic in :preview can be tested off-device. commonTest
+        // connects to it through the default KMP source-set hierarchy.
+        withHostTest {}
     }
 
     sourceSets {
@@ -22,6 +26,10 @@ kotlin {
                 implementation(compose.foundation)
                 implementation(compose.ui)
                 implementation(libs.miuix)
+                // Explicit, not relied on transitively through Compose: the
+                // lifecycle-aware telemetry/process pollers use delay and
+                // suspendCancellableCoroutine directly in common code.
+                implementation(libs.kotlinx.coroutines.core)
             }
         }
         val androidMain by getting {
@@ -42,6 +50,11 @@ kotlin {
                 // tested off-device. Android's androidMain compiles to JVM
                 // bytecode, so a plain java-library is a valid dependency here.
                 implementation(project(":domain"))
+            }
+        }
+        val commonTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
             }
         }
     }

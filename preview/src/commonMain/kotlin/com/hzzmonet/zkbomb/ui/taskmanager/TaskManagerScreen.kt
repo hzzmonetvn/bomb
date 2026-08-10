@@ -10,11 +10,16 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.hzzmonet.zkbomb.data.SystemView
+import com.hzzmonet.zkbomb.data.BombServiceState
+import com.hzzmonet.zkbomb.data.ProcessListState
+import com.hzzmonet.zkbomb.data.ProcessRow
+import com.hzzmonet.zkbomb.data.SelectedProcessMemoryState
+import com.hzzmonet.zkbomb.data.SystemTelemetryState
+import com.hzzmonet.zkbomb.data.formatBytesGb
+import com.hzzmonet.zkbomb.data.rememberSelectedProcessMemory
 import com.hzzmonet.zkbomb.preview.PreviewData
 import com.hzzmonet.zkbomb.preview.PreviewUiState
 import com.hzzmonet.zkbomb.ui.design.BombIcon
@@ -33,8 +38,6 @@ import com.hzzmonet.zkbomb.ui.design.component.BombUnsupportedState
 import com.hzzmonet.zkbomb.ui.design.component.formatOneDecimal
 import com.hzzmonet.zkbomb.ui.navigation.BombNavigator
 import com.hzzmonet.zkbomb.ui.navigation.BombRoute
-import com.hzzmonet.zkbomb.ui.stats.CpuDetailCard
-import com.hzzmonet.zkbomb.ui.stats.MemoryCard
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
@@ -54,10 +57,15 @@ private val refreshLevels = listOf(
 fun LazyListScope.taskManagerContent(
     state: PreviewUiState,
     navigator: BombNavigator,
-    system: SystemView,
+    service: BombServiceState,
+    telemetry: SystemTelemetryState,
+    processList: ProcessListState,
 ) {
-    item { CpuDetailCard(system, showTrend = true) }
-    item { MemoryCard(system) }
+    // CPU and RAM come from the same privileged SystemTelemetrySnapshot that
+    // Monitor uses — one pipeline, one CPU% (computed from /proc/stat deltas by
+    // the service), instead of the old unprivileged SystemView headline that read
+    // "—" on a locked-down build while the process rows showed real per-process CPU.
+    item { TelemetrySummaryCard(telemetry) }
 
     item { BombSectionTitle("Refresh") }
     item {
@@ -89,66 +97,55 @@ fun LazyListScope.taskManagerContent(
         }
     }
 
-    if (system.isLive) {
-        liveProcesses(system)
-    } else {
-        sampleProcesses(state, navigator)
-    }
+    processSection(state, processList)
 
     if (state.selectedProcessPid != null) {
-        item { ProcessDetailBottomSheet(state = state, navigator = navigator) }
+        item {
+            ProcessDetailBottomSheet(
+                state = state,
+                navigator = navigator,
+                service = service,
+                processList = processList,
+            )
+        }
     }
 }
 
 /**
- * On a device an unprivileged app sees exactly one process: its own. Android
- * hides the rest (`hidepid`, and `getRunningAppProcesses` returns only the
- * caller since Android 5). So Bomb shows what it genuinely has and names what
- * it would take to show the rest — it does not fill the screen with samples.
+ * The real process list, from the privileged snapshot. Every non-Ready outcome
+ * is shown as itself — loading, unsupported, empty or error — rather than being
+ * papered over with a sample.
  */
-private fun LazyListScope.liveProcesses(system: SystemView) {
-    item { BombSectionTitle("Bomb's own process") }
-    item {
-        BombCard {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                OwnProcessLine("PSS", system.ownPssMb?.let { "$it MB" })
-                OwnProcessLine("Threads", system.ownThreads?.toString())
-                OwnProcessLine("Frame rate", system.fps?.let { "$it FPS" })
-                OwnProcessLine("Uptime (device)", system.uptime)
+private fun LazyListScope.processSection(state: PreviewUiState, processList: ProcessListState) {
+    item { BombSectionTitle("Processes") }
+
+    when (processList) {
+        ProcessListState.Loading -> item { LoadingCard() }
+
+        is ProcessListState.Unsupported -> item {
+            BombUnsupportedState(title = "System-wide process list", reason = processList.reason)
+        }
+
+        is ProcessListState.Error -> item {
+            BombCard {
+                Text(
+                    text = processList.message,
+                    modifier = Modifier.padding(16.dp),
+                    fontSize = 13.sp,
+                    color = BombTheme.colors.critical,
+                )
             }
         }
-    }
 
-    item {
-        BombUnsupportedState(
-            title = "System-wide process list",
-            reason = "Android hides other processes from unprivileged apps: /proc is " +
-                "mounted with hidepid and getRunningAppProcesses returns only the " +
-                "caller. A real task manager needs the priv-app or root backend — see " +
-                "docs/ROM_INTEGRATION.md.",
-        )
+        ProcessListState.Empty -> item {
+            BombEmptyState("The service returned no visible processes")
+        }
+
+        is ProcessListState.Ready -> readyProcesses(state, processList)
     }
 }
 
-@Composable
-private fun OwnProcessLine(label: String, value: String?) {
-    Row(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = label,
-            modifier = Modifier.weight(1f),
-            fontSize = 13.sp,
-            color = BombTheme.miuix.onSurfaceVariantSummary,
-        )
-        Text(
-            text = value ?: "—",
-            fontSize = 13.sp,
-            color = BombTheme.miuix.onSurface,
-        )
-    }
-}
-
-private fun LazyListScope.sampleProcesses(state: PreviewUiState, navigator: BombNavigator) {
-    item { BombSectionTitle("Processes") }
+private fun LazyListScope.readyProcesses(state: PreviewUiState, ready: ProcessListState.Ready) {
     item {
         TextField(
             state = state.processQuery,
@@ -182,45 +179,55 @@ private fun LazyListScope.sampleProcesses(state: PreviewUiState, navigator: Bomb
     }
 
     val query = state.processQuery.text.toString().trim().lowercase()
-    val visible = PreviewData.processes
-        .filter { process ->
+    val visible = ready.processes
+        .filter { row ->
             val matchFilter = when (state.processFilter) {
-                1 -> !process.system
-                2 -> process.system
+                1 -> !row.isSystem
+                2 -> row.isSystem
                 else -> true
             }
             val matchQuery = query.isEmpty() ||
-                process.name.lowercase().contains(query) ||
-                process.processName.lowercase().contains(query) ||
-                process.pid.toString().contains(query)
+                row.processName.lowercase().contains(query) ||
+                (row.packageName?.lowercase()?.contains(query) == true) ||
+                row.pid.toString().contains(query)
             matchFilter && matchQuery
         }
         .sortedWith(
             when (state.processSort) {
-                1 -> compareByDescending<PreviewData.DemoProcess> { it.ramMb }
-                2 -> compareBy<PreviewData.DemoProcess> { it.pid }
-                3 -> compareBy<PreviewData.DemoProcess> { it.name }
-                else -> compareByDescending<PreviewData.DemoProcess> { it.cpu }
-            }
+                // Unknown values sort last: -1 keeps a withheld metric off the top.
+                1 -> compareByDescending<ProcessRow> { it.memoryMb ?: -1 }
+                2 -> compareBy<ProcessRow> { it.pid }
+                3 -> compareBy<ProcessRow> { it.processName.lowercase() }
+                else -> compareByDescending<ProcessRow> { it.cpuPercent ?: -1f }
+            },
         )
 
-    item { BombSectionTitle("${visible.size} processes") }
+    item {
+        BombSectionTitle(
+            if (ready.truncated) "${visible.size} shown · list capped by the service" else "${visible.size} processes",
+        )
+    }
     item {
         if (visible.isEmpty()) {
             BombEmptyState("No matching processes found")
         } else {
             BombCard {
-                visible.forEachIndexed { index, process ->
+                visible.forEachIndexed { index, row ->
                     if (index > 0) BombRowDivider()
                     BombProcessRow(
-                        name = process.name,
-                        processName = process.processName,
-                        pid = process.pid,
-                        cpuPercent = process.cpu,
-                        memoryMb = process.ramMb,
-                        tint = PreviewData.tintFor(process.processName),
-                        state = process.state,
-                        onClick = { state.selectedProcessPid = process.pid },
+                        name = row.processName,
+                        processName = row.packageName ?: "uid ${row.uid}",
+                        pid = row.pid,
+                        cpuPercent = row.cpuPercent,
+                        memoryMb = row.memoryMb,
+                        tint = PreviewData.tintFor(row.processName),
+                        state = if (row.foreground) "FG" else null,
+                        onClick = {
+                            // Capture the exact process generation, not just the PID,
+                            // so the memory view can reject a reused PID.
+                            state.selectedProcessPid = row.pid
+                            state.selectedProcessStartTicks = row.startTimeTicks
+                        },
                     )
                 }
             }
@@ -229,38 +236,165 @@ private fun LazyListScope.sampleProcesses(state: PreviewUiState, navigator: Bomb
 }
 
 @Composable
+private fun LoadingCard() {
+    BombCard {
+        Text(
+            text = "Reading processes from the privileged service…",
+            modifier = Modifier.padding(16.dp),
+            fontSize = 13.sp,
+            color = BombTheme.miuix.onSurfaceVariantSummary,
+        )
+    }
+}
+
+/**
+ * The system CPU/RAM headline, from the privileged telemetry snapshot — the same
+ * source Monitor uses. CPU% is null on the first sample (a rate needs two), shown
+ * as "collecting…" rather than a fabricated 0. Every non-Ready outcome is shown
+ * as itself; there is no SystemView/sample fallback.
+ */
+@Composable
+private fun TelemetrySummaryCard(state: SystemTelemetryState) {
+    when (state) {
+        SystemTelemetryState.Loading ->
+            SummaryNote("Reading system telemetry from the privileged service…")
+
+        is SystemTelemetryState.Unsupported ->
+            BombUnsupportedState(title = "System CPU / memory", reason = state.reason)
+
+        is SystemTelemetryState.Error ->
+            SummaryNote(state.message, error = true)
+
+        is SystemTelemetryState.Ready -> {
+            val telemetry = state.telemetry
+            val usedGb = formatBytesGb(telemetry.totalMemoryBytes - telemetry.availableMemoryBytes)
+            val totalGb = formatBytesGb(telemetry.totalMemoryBytes)
+            val memoryText = when {
+                usedGb != null && totalGb != null -> "$usedGb / $totalGb GB"
+                usedGb != null -> "$usedGb GB"
+                else -> "—"
+            }
+            BombCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "CPU",
+                            fontSize = 13.sp,
+                            color = BombTheme.miuix.onSurfaceVariantSummary,
+                        )
+                        Row(
+                            modifier = Modifier.padding(top = 2.dp),
+                            verticalAlignment = Alignment.Bottom,
+                        ) {
+                            Text(
+                                text = state.cpuPercent?.toString() ?: "—",
+                                fontSize = 30.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (state.cpuPercent != null) {
+                                    BombTheme.miuix.onSurface
+                                } else {
+                                    BombTheme.miuix.onSurfaceVariantSummary
+                                },
+                            )
+                            Text(
+                                text = if (state.cpuPercent != null) "% all cores" else "collecting…",
+                                modifier = Modifier.padding(start = 3.dp, bottom = 4.dp),
+                                fontSize = 12.sp,
+                                color = BombTheme.miuix.onSurfaceVariantSummary,
+                            )
+                        }
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = "Memory",
+                            fontSize = 13.sp,
+                            color = BombTheme.miuix.onSurfaceVariantSummary,
+                        )
+                        Text(
+                            text = memoryText,
+                            modifier = Modifier.padding(top = 2.dp),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = BombTheme.colors.ram,
+                        )
+                        if (telemetry.lowMemory) {
+                            Text(
+                                text = "Low memory",
+                                modifier = Modifier.padding(top = 2.dp),
+                                fontSize = 11.sp,
+                                color = BombTheme.colors.warn,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SummaryNote(text: String, error: Boolean = false) {
+    BombCard {
+        Text(
+            text = text,
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            fontSize = 13.sp,
+            color = if (error) BombTheme.colors.critical else BombTheme.miuix.onSurfaceVariantSummary,
+        )
+    }
+}
+
+@Composable
 private fun ProcessDetailBottomSheet(
     state: PreviewUiState,
     navigator: BombNavigator,
+    service: BombServiceState,
+    processList: ProcessListState,
 ) {
     val pid = state.selectedProcessPid ?: return
-    val process = PreviewData.processes.firstOrNull { it.pid == pid } ?: return
-    val detail = PreviewData.detailFor(process)
-    val app = PreviewData.apps.firstOrNull { it.packageName == process.processName }
-    val isFrozen = state.freezeList.containsKey(process.processName)
+    val dismiss = {
+        state.selectedProcessPid = null
+        state.selectedProcessStartTicks = null
+    }
+    val row = (processList as? ProcessListState.Ready)?.processes?.firstOrNull { it.pid == pid }
+    if (row == null) {
+        // The process ended (or the list refreshed) while the sheet was open. No
+        // memory call is made here — the PID-gone case is handled by this lookup.
+        BombBottomSheet(onDismissRequest = dismiss, title = "Process $pid") {
+            BombEmptyState("This process is no longer in the latest sample")
+        }
+        return
+    }
+
+    // On-demand, single call for this exact PID; cancelled when the sheet closes
+    // or the PID changes. The identity guard uses the generation captured at tap.
+    val memory = rememberSelectedProcessMemory(
+        service = service,
+        pid = pid,
+        expectedStartTimeTicks = state.selectedProcessStartTicks,
+        currentStartTimeTicks = row.startTimeTicks,
+    )
 
     BombBottomSheet(
-        onDismissRequest = { state.selectedProcessPid = null },
-        title = process.name,
+        onDismissRequest = dismiss,
+        title = row.processName,
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 BombAppAvatar(
-                    label = process.name,
-                    tint = PreviewData.tintFor(process.processName),
+                    label = row.processName,
+                    tint = PreviewData.tintFor(row.processName),
                     size = 42.dp,
                 )
                 Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
                     Text(
-                        text = process.processName,
+                        text = row.packageName ?: "uid ${row.uid}",
                         fontSize = 13.sp,
                         color = BombTheme.miuix.onSurfaceVariantSummary,
                     )
@@ -268,84 +402,77 @@ private fun ProcessDetailBottomSheet(
                         modifier = Modifier.padding(top = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        BombBadge(
-                            text = detail.schedState,
-                            color = if (detail.schedState == "Running") {
-                                BombTheme.colors.ok
-                            } else {
-                                BombTheme.colors.frozen
-                            },
-                        )
-                        BombBadge(
-                            text = "PID ${process.pid}",
-                            color = BombTheme.miuix.primary,
-                        )
-                        if (process.system) {
-                            BombBadge(text = "System", color = BombTheme.colors.warn)
-                        }
+                        BombBadge(text = "PID ${row.pid}", color = BombTheme.miuix.primary)
+                        if (row.foreground) BombBadge(text = "Foreground", color = BombTheme.colors.ok)
+                        if (row.isSystem) BombBadge(text = "System", color = BombTheme.colors.warn)
+                        row.category?.let { BombBadge(text = it, color = BombTheme.colors.accent) }
                     }
                 }
             }
 
             BombCard {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(7.dp),
-                ) {
-                    DetailLine("PID", process.pid.toString())
-                    DetailLine("UID", detail.uid.toString())
-                    DetailLine("Process State", detail.schedState)
-                    DetailLine("CPU Utilisation", "${formatOneDecimal(process.cpu)}%")
-                    DetailLine("CPU Breakdown", "User: ${formatOneDecimal(detail.userPercent)}% · Sys: ${formatOneDecimal(detail.sysPercent)}%")
-                    DetailLine("Memory (RSS / PSS)", "${process.ramMb} MB / ${detail.pssMb} MB")
-                    DetailLine("Swap / Threads", "${detail.swapMb} MB / ${detail.threads} threads")
-                    DetailLine("oom_score_adj", detail.oomAdj.toString())
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    DetailLine("PID", row.pid.toString())
+                    DetailLine("UID / user", "${row.uid} / ${row.userId}")
+                    DetailLine("CPU (share of total)", row.cpuPercent?.let { "${formatOneDecimal(it)}%" } ?: "—")
+                    MemoryDetailLines(memory, row)
+                    DetailLine("Threads", row.threadCount?.toString() ?: "—")
+                    DetailLine("Importance", row.importance.toString())
                 }
             }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+            // Force stop and component control are the Package Inspector backend
+            // (COMPONENT_CONTROL / PACKAGE_FORCE_STOP). Until that is wired, the
+            // action is disabled rather than faked; freeze already has a home.
+            row.packageName?.let { pkg ->
                 Button(
                     onClick = {
-                        state.selectedProcessPid = null
-                    },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColorsPrimary(),
-                ) {
-                    Text(text = "Force Stop")
-                }
-
-                Button(
-                    onClick = {
-                        if (isFrozen) {
-                            state.freezeList.remove(process.processName)
-                        } else {
-                            state.freezeList[process.processName] = "Soft Freeze"
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColorsPrimary(),
-                ) {
-                    Text(text = if (isFrozen) "Unfreeze" else "Freeze")
-                }
-            }
-
-            if (app != null) {
-                Button(
-                    onClick = {
-                        val targetPkg = process.processName
-                        state.selectedProcessPid = null
-                        navigator.push(BombRoute.AppControl(targetPkg))
+                        dismiss()
+                        navigator.push(BombRoute.AppControl(pkg))
                     },
                     modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColorsPrimary(),
                 ) {
                     Text(text = "Open App Control")
                 }
             }
+        }
+    }
+}
+
+private fun Long?.toMb(): String = this?.let { "${it / (1024 * 1024)} MB" } ?: "—"
+
+/**
+ * The selected process's memory rows. On v7 these are the on-demand sample; on an
+ * older service (Unsupported) they fall back to the list snapshot values already
+ * in hand — no extra call. Every non-Ready state says why, and a null metric
+ * renders "—", never a fabricated 0.
+ */
+@Composable
+private fun MemoryDetailLines(state: SelectedProcessMemoryState, fallback: ProcessRow) {
+    when (state) {
+        SelectedProcessMemoryState.Loading ->
+            DetailLine("Memory", "sampling…")
+
+        SelectedProcessMemoryState.Unsupported -> {
+            DetailLine("PSS", fallback.pssBytes.toMb())
+            DetailLine("Private dirty", fallback.privateDirtyBytes.toMb())
+            DetailLine("RSS", fallback.rssBytes.toMb())
+        }
+
+        SelectedProcessMemoryState.Disappeared ->
+            DetailLine("Memory", "process ended or PID reused")
+
+        is SelectedProcessMemoryState.Unavailable ->
+            DetailLine("Memory", state.reason)
+
+        is SelectedProcessMemoryState.Error ->
+            DetailLine("Memory", state.message)
+
+        is SelectedProcessMemoryState.Ready -> {
+            DetailLine("PSS", state.memory.pssBytes.toMb())
+            DetailLine("Private dirty", state.memory.privateDirtyBytes.toMb())
+            DetailLine("RSS", state.memory.rssBytes.toMb())
         }
     }
 }

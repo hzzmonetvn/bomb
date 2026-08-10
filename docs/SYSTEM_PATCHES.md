@@ -55,7 +55,7 @@ arbitrary file/sysfs writes, or unreviewed `audit2allow` output.
 | --- | --- | --- | --- |
 | Task Manager | `DUMP`, `FORCE_STOP_PACKAGES`, `KILL_BACKGROUND_PROCESSES`; typed process API | Start `bombd` only when process telemetry has subscribers | Read selected `/proc/<pid>` files; never broad proc write |
 | Stats / overlay | `DUMP`, `PACKAGE_USAGE_STATS`, `SYSTEM_ALERT_WINDOW` | No always-on poller; collector follows subscribers | Read selected procfs, thermal and GPU nodes; overlay stays in app domain |
-| Freeze / App Control | `CHANGE_APP_IDLE_STATE`, `CHANGE_COMPONENT_ENABLED_STATE`, `MANAGE_APP_OPS_MODES`; cross-user access only when required | Optional reconciliation after PackageManager and user unlock | Binder calls to package/app-ops services; do not use the daemon for framework operations |
+| Freeze / App Control | `FORCE_STOP_PACKAGES`, `CHANGE_APP_IDLE_STATE`, `CHANGE_COMPONENT_ENABLED_STATE`, `MANAGE_APP_OPS_MODES`; cross-user access only when required | Optional reconciliation after PackageManager and user unlock | Binder calls to ActivityManager/package/app-ops services; do not use the daemon for framework operations |
 | Performance profiles | Typed framework service plus allowlisted device backend | Restore safe defaults at boot and after daemon failure | Write only probed CPU/GPU/cgroup nodes with bounded values |
 | Battery Lab | Read BatteryManager/health; privileged writes use a charging backend | Restore stock charging settings on boot and service stop | Write only capability-probed battery nodes; separate Qualcomm/MTK allowlists |
 | Network Control | Typed per-UID policy API; never accept raw iptables commands | Restore persisted policy after netd is ready | Binder access to network policy or narrowly scoped daemon networking capability |
@@ -63,6 +63,85 @@ arbitrary file/sysfs writes, or unreviewed `audit2allow` output.
 | Bomb Bridge | Notification-listener permission and capability-gated HyperOS renderer | None | Normally no daemon rule; add only observed, necessary service access |
 | Call recording | Platform-supported source and explicit user consent | Lifecycle-owned recorder service, never a hidden boot recorder | Audio service/device access only after the framework path is proven |
 | Rules | Schedule exact work only when a rule requires it | Restore after user unlock with bounded retries | Union of invoked typed operations, never a generic automation domain |
+
+## Package Inspector contract (API v5)
+
+API v5 appends three typed Binder operations without changing earlier method
+ordering:
+
+- `getPackageSnapshot(packageName, userId)` returns bounded package metadata,
+  certificate SHA-256 digests and at most 512 manifest components, with a second
+  aggregate string budget to stay below Binder's transaction ceiling. It reports
+  the real component total and a truncation flag.
+- `forceStopPackage(packageName, userId)` refuses protected packages and only
+  succeeds after the package has `FLAG_STOPPED` and no observed running process.
+- `setComponentState(packageName, userId, className, state)` accepts only
+  `DEFAULT`, `ENABLED` or `DISABLED`, verifies the component against the target
+  package's complete manifest, applies the override and reads it back.
+
+All three are current-user only. Cross-user support remains unavailable until a
+separate user-scoped design and permission review exist. The existing manifest
+and privapp allowlist already contain `FORCE_STOP_PACKAGES` and
+`CHANGE_COMPONENT_ENABLED_STATE`; this API does not require a new init service,
+property or SELinux allow rule.
+
+## Visibility, settings and firewall contract (API v6)
+
+API v6 keeps the Binder surface typed. Every write follows the same order:
+validate the real Binder caller, validate and bound every argument, validate the
+current user, then probe capability and execute. UID-scoped inputs must identify
+an application UID and the UID's encoded user must equal `userId`; cross-user
+writes remain unsupported.
+
+The server-side limits are part of the contract:
+
+- visibility policy: at most 512 validated package names, 2,048 caller policies;
+- settings: profile ID 1..128 (`[A-Za-z0-9._-]`), profile name 1..256, key
+  1..256, value at most 4,096 characters, 128 profiles, 512 overrides per
+  profile and 2,048 assignments;
+- firewall: note at most 256 printable characters and at most 4,096 UID rules.
+
+Settings virtualization is fail-closed. Only keys classified `APP_READ` in
+`SettingsKeyPolicy` may be stored; `SYSTEM_READ` (`font_scale`), forbidden
+identity keys (`secure/android_id`), per-app-configuration keys and unknown keys
+are refused. Typed values use canonical platform wire strings: booleans are
+`"0"`/`"1"`, NULL has a null payload, integer/long/float strings are canonical,
+and non-finite floats are rejected. Overrides and assignments require an existing
+profile. The hot-path snapshot always passes through for system UIDs, a UID/user
+mismatch, an empty caller-package set, or conflicting/incomplete shared-UID
+assignments.
+
+These API guards add no generic daemon interface and require no new init trigger,
+property namespace or SELinux allow rule. The actual visibility/settings
+enforcement remains behind the separately reviewed framework hooks and their ROM
+marker capabilities. A ROM/property marker is declaration evidence only: it does
+not make either capability `SUPPORTED`. Until a real system_server bridge has
+completed a handshake and acknowledged the applied policy revision, both
+visibility and settings virtualization remain fail-closed as `UNSUPPORTED`, and
+Binder writes return before mutating the service-local cache. Firewall remains
+unavailable unless its typed platform backend is present.
+
+## Selected-process memory contract (API v7)
+
+API v7 appends `getSelectedProcessMemory(pid)` after every v1–v6 transaction and
+does not change an existing Parcelable layout. `getProcessSnapshot()` remains
+wire-compatible but is now a cheap process list: PSS and private-dirty are null,
+while RSS and proc counters are read independently and remain nullable when
+procfs or SELinux withholds them.
+
+The selected-memory call accepts one positive PID only after confirming that it
+belongs to the same bounded 192-process inventory used by the list. The backend
+passes exactly that one PID to `ActivityManager.getProcessMemoryInfo`, verifies
+the PID is still visible after sampling, and never falls back to another process.
+Its typed status distinguishes available, invalid, not-visible, disappeared,
+unavailable and permission-denied results. Zero/unreadable platform counters are
+reported as null, never fabricated as zero. `PROCESS_PSS_TELEMETRY` is supported
+only when a real one-PID probe of a non-service process returns at least one
+usable memory metric.
+
+This read-only API requires no new permission, init trigger, property or SELinux
+allow rule beyond the process visibility and ActivityManager access already
+required by Task Manager.
 
 ## Predictive back
 

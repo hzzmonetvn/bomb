@@ -33,6 +33,10 @@ sealed interface BombRoute {
     data object VoipPicker : BombRoute
     data object ExecutionMode : BombRoute
     data object Appearance : BombRoute
+    data object AppVisibility : BombRoute
+    data object SettingsVirtualization : BombRoute
+    data object AdBlock : BombRoute
+    data object Firewall : BombRoute
     data class AppControl(val packageName: String) : BombRoute
     data class ProcessDetail(val pid: Int) : BombRoute
 }
@@ -115,6 +119,10 @@ fun startRouteFor(slug: String?): Pair<BombRoute, BombRoute?> = when (slug?.lowe
     "voip" -> BombRoute.More to BombRoute.VoipPicker
     "mode", "root" -> BombRoute.More to BombRoute.ExecutionMode
     "appearance", "background" -> BombRoute.More to BombRoute.Appearance
+    "visibility", "appvisibility" -> BombRoute.Apps to BombRoute.AppVisibility
+    "settingsvirt", "settingsvirtualization" -> BombRoute.Apps to BombRoute.SettingsVirtualization
+    "adblock", "dns" -> BombRoute.More to BombRoute.AdBlock
+    "firewall" -> BombRoute.More to BombRoute.Firewall
     "process" -> BombRoute.Home to BombRoute.ProcessDetail(9214)
     "appcontrol" -> BombRoute.Apps to BombRoute.AppControl("org.telegram.messenger")
     else -> BombRoute.Home to null
@@ -157,6 +165,10 @@ fun titleOf(route: BombRoute): String = when (route) {
     BombRoute.VoipPicker -> "VoIP apps"
     BombRoute.ExecutionMode -> "Execution mode"
     BombRoute.Appearance -> "Appearance"
+    BombRoute.AppVisibility -> "App Visibility"
+    BombRoute.SettingsVirtualization -> "Settings Virtualization"
+    BombRoute.AdBlock -> "AdBlock"
+    BombRoute.Firewall -> "Firewall"
     is BombRoute.AppControl -> "App Control"
     is BombRoute.ProcessDetail -> "Process"
 }

@@ -22,10 +22,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hzzmonet.zkbomb.data.SystemTelemetryState
 import com.hzzmonet.zkbomb.data.SystemView
+import com.hzzmonet.zkbomb.data.formatBytesGb
 import com.hzzmonet.zkbomb.data.rememberOverlayPermission
 import com.hzzmonet.zkbomb.data.temperatureTrend
-import com.hzzmonet.zkbomb.preview.PreviewData
 import com.hzzmonet.zkbomb.preview.PreviewUiState
 import com.hzzmonet.zkbomb.ui.design.BombTheme
 import com.hzzmonet.zkbomb.ui.design.component.BombCard
@@ -46,9 +47,13 @@ import kotlin.math.roundToInt
 
 private val presets = listOf("Classic", "Mini", "Gaming")
 
-fun LazyListScope.monitorContent(state: PreviewUiState, system: SystemView) {
+fun LazyListScope.monitorContent(
+    state: PreviewUiState,
+    system: SystemView,
+    telemetry: SystemTelemetryState,
+) {
     item { OverlayPermissionCard() }
-    item { OverlayPreviewCard(state) }
+    item { OverlayPreviewCard(state, system) }
 
     item {
         BombSegmentedButton(
@@ -93,6 +98,13 @@ fun LazyListScope.monitorContent(state: PreviewUiState, system: SystemView) {
             )
         }
     }
+
+    // Privileged system telemetry: the CPU figure here is computed from
+    // successive /proc/stat total/idle deltas by the service, so it is present
+    // even when an unprivileged /proc/stat read (the SystemView cards below)
+    // returns nothing.
+    item { BombSectionTitle("System telemetry") }
+    item { SystemTelemetryCard(telemetry) }
 
     item { BombSectionTitle("Live") }
     item { CpuDetailCard(system) }
@@ -153,11 +165,109 @@ private fun descriptionOf(name: String): String = when (name) {
 }
 
 /**
+ * The privileged system telemetry, or the honest reason it is not here.
+ *
+ * CPU is null on the very first sample (a rate needs two), which reads as
+ * "collecting…" rather than a fake 0. Memory, battery and thermal come straight
+ * from the snapshot; a withheld field shows "—".
+ */
+@Composable
+private fun SystemTelemetryCard(state: SystemTelemetryState) {
+    when (state) {
+        SystemTelemetryState.Loading -> BombCard {
+            Text(
+                text = "Reading system telemetry from the privileged service…",
+                modifier = Modifier.padding(16.dp),
+                fontSize = 13.sp,
+                color = BombTheme.miuix.onSurfaceVariantSummary,
+            )
+        }
+
+        is SystemTelemetryState.Unsupported ->
+            BombUnsupportedState(title = "System telemetry", reason = state.reason)
+
+        is SystemTelemetryState.Error -> BombCard {
+            Text(
+                text = state.message,
+                modifier = Modifier.padding(16.dp),
+                fontSize = 13.sp,
+                color = BombTheme.colors.critical,
+            )
+        }
+
+        is SystemTelemetryState.Ready -> {
+            val t = state.telemetry
+            BombCard {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(9.dp)) {
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text(
+                            text = state.cpuPercent?.toString() ?: "—",
+                            fontSize = 30.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (state.cpuPercent != null) BombTheme.miuix.onSurface else BombTheme.miuix.onSurfaceVariantSummary,
+                        )
+                        Text(
+                            text = if (state.cpuPercent != null) "% CPU (all cores)" else "collecting…",
+                            modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+                            fontSize = 12.sp,
+                            color = BombTheme.miuix.onSurfaceVariantSummary,
+                        )
+                    }
+                    TelemetryLine("Memory used", memoryUsed(t))
+                    TelemetryLine("Low memory", if (t.lowMemory) "Yes" else "No")
+                    TelemetryLine("Thermal", thermalLabel(t.thermalStatus))
+                    TelemetryLine("Battery", t.batteryPercent?.let { "$it%" } ?: "—")
+                    TelemetryLine(
+                        "Battery temperature",
+                        t.batteryTemperatureDeciCelsius?.let { "${formatOneDecimal(it / 10f)}°C" } ?: "—",
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun memoryUsed(t: com.hzzmonet.zkbomb.data.BombSystemTelemetry): String {
+    val used = t.totalMemoryBytes - t.availableMemoryBytes
+    val usedGb = formatBytesGb(used) ?: return "—"
+    val totalGb = formatBytesGb(t.totalMemoryBytes) ?: return "$usedGb GB"
+    return "$usedGb / $totalGb GB"
+}
+
+/** PowerManager thermal status codes → label, or "—" when the service withheld it. */
+private fun thermalLabel(status: Int?): String = when (status) {
+    null -> "—"
+    0 -> "None"
+    1 -> "Light"
+    2 -> "Moderate"
+    3 -> "Severe"
+    4 -> "Critical"
+    5 -> "Emergency"
+    6 -> "Shutdown"
+    else -> "Unknown"
+}
+
+@Composable
+private fun TelemetryLine(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            fontSize = 13.sp,
+            color = BombTheme.miuix.onSurfaceVariantSummary,
+        )
+        Text(
+            text = value,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            color = BombTheme.miuix.onSurface,
+        )
+    }
+}
+
+/**
  * Asks for the draw-over-other-apps permission, and says plainly what happens
  * without it.
- *
- * Disappears once granted — a permanent "granted ✓" row is noise on a screen the
- * user opens to change monitors, not to admire their permissions.
  */
 @Composable
 private fun OverlayPermissionCard() {
@@ -192,10 +302,22 @@ private fun OverlayPermissionCard() {
     }
 }
 
+/**
+ * A live preview of the floating overlay, fed from the same real measurements the
+ * rest of the screen uses — a metric the device cannot report shows "—", never a
+ * fabricated number.
+ */
 @Composable
-private fun OverlayPreviewCard(state: PreviewUiState) {
+private fun OverlayPreviewCard(state: PreviewUiState, system: SystemView) {
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
+
+    val cpu = system.cpuPercent?.toString() ?: "—"
+    val gpu = system.gpuPercent?.toString() ?: "—"
+    val ram = system.ramUsedGb ?: "—"
+    val fps = system.fps?.toString() ?: "—"
+    val temp = system.socTempC ?: "—"
+    val power = system.powerWatts ?: "—"
 
     BombCard {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -206,7 +328,8 @@ private fun OverlayPreviewCard(state: PreviewUiState) {
                 color = BombTheme.miuix.onSurface,
             )
             Text(
-                text = "Drag the overlay box below to adjust position. Customise opacity and scaling dynamically.",
+                text = "Drag the overlay box below to adjust position. Values are live; " +
+                    "a metric this build cannot read shows as —.",
                 modifier = Modifier.padding(top = 3.dp),
                 fontSize = 12.sp,
                 color = BombTheme.miuix.onSurfaceVariantSummary,
@@ -238,32 +361,31 @@ private fun OverlayPreviewCard(state: PreviewUiState) {
                             compact = true,
                             opacity = state.overlayOpacity,
                             entries = listOf(
-                                OverlayEntry("FPS", "${PreviewData.FPS}", BombTheme.colors.fps),
-                                OverlayEntry("TEMP", "${PreviewData.SOC_TEMP}°", BombTheme.colors.thermal),
-                                OverlayEntry("PWR", "${PreviewData.POWER_WATTS}W", BombTheme.colors.power),
+                                OverlayEntry("FPS", fps, BombTheme.colors.fps),
+                                OverlayEntry("TEMP", "$temp°", BombTheme.colors.thermal),
+                                OverlayEntry("PWR", "${power}W", BombTheme.colors.power),
                             ),
                         )
 
                         2 -> BombMonitorOverlay(
                             opacity = state.overlayOpacity,
                             entries = listOf(
-                                OverlayEntry("FPS", "${PreviewData.FPS}", BombTheme.colors.fps),
-                                OverlayEntry("FRAME", "8.4 ms", BombTheme.colors.fps),
-                                OverlayEntry("GPU", "${PreviewData.GPU_PERCENT}%", BombTheme.colors.gpu),
-                                OverlayEntry("TEMP", "${PreviewData.SOC_TEMP}°C", BombTheme.colors.thermal),
-                                OverlayEntry("POWER", "${PreviewData.POWER_WATTS} W", BombTheme.colors.power),
+                                OverlayEntry("FPS", fps, BombTheme.colors.fps),
+                                OverlayEntry("GPU", "$gpu%", BombTheme.colors.gpu),
+                                OverlayEntry("TEMP", "$temp°C", BombTheme.colors.thermal),
+                                OverlayEntry("POWER", "$power W", BombTheme.colors.power),
                             ),
                         )
 
                         else -> BombMonitorOverlay(
                             opacity = state.overlayOpacity,
                             entries = listOf(
-                                OverlayEntry("CPU", "${PreviewData.CPU_PERCENT}%", BombTheme.colors.cpu),
-                                OverlayEntry("GPU", "${PreviewData.GPU_PERCENT}%", BombTheme.colors.gpu),
-                                OverlayEntry("RAM", "${PreviewData.RAM_USED_GB} GB", BombTheme.colors.ram),
-                                OverlayEntry("FPS", "${PreviewData.FPS}", BombTheme.colors.fps),
-                                OverlayEntry("TEMP", "${PreviewData.SOC_TEMP}°C", BombTheme.colors.thermal),
-                                OverlayEntry("POWER", "${PreviewData.POWER_WATTS} W", BombTheme.colors.power),
+                                OverlayEntry("CPU", "$cpu%", BombTheme.colors.cpu),
+                                OverlayEntry("GPU", "$gpu%", BombTheme.colors.gpu),
+                                OverlayEntry("RAM", "$ram GB", BombTheme.colors.ram),
+                                OverlayEntry("FPS", fps, BombTheme.colors.fps),
+                                OverlayEntry("TEMP", "$temp°C", BombTheme.colors.thermal),
+                                OverlayEntry("POWER", "$power W", BombTheme.colors.power),
                             ),
                         )
                     }
@@ -296,21 +418,13 @@ private fun GpuThermalCard(system: SystemView) {
                     },
                 )
             }
-            if (system.gpuPercent != null) {
-                BombSparkline(
-                    values = PreviewData.gpuHistory,
-                    color = BombTheme.colors.gpu,
-                    modifier = Modifier.fillMaxWidth().height(48.dp).padding(top = 10.dp),
-                )
-            } else {
-                Text(
-                    text = "GPU load lives in vendor sysfs nodes that an unprivileged " +
-                        "app cannot open. Available in ROM and root modes.",
-                    modifier = Modifier.padding(top = 6.dp),
-                    fontSize = 12.sp,
-                    color = BombTheme.miuix.onSurfaceVariantSummary,
-                )
-            }
+            Text(
+                text = "GPU load lives in vendor sysfs nodes that an unprivileged " +
+                    "app cannot open. Available in ROM and root modes.",
+                modifier = Modifier.padding(top = 6.dp),
+                fontSize = 12.sp,
+                color = BombTheme.miuix.onSurfaceVariantSummary,
+            )
 
             Row(
                 modifier = Modifier.padding(top = 16.dp),

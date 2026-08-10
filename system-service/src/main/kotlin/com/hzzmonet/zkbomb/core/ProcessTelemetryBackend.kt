@@ -11,6 +11,8 @@ import android.os.Process
 import android.os.SystemClock
 import com.hzzmonet.zkbomb.api.ProcessInfo
 import com.hzzmonet.zkbomb.api.ProcessSnapshot
+import com.hzzmonet.zkbomb.api.SelectedProcessMemory
+import com.hzzmonet.zkbomb.api.SelectedProcessMemoryStatus
 import com.hzzmonet.zkbomb.api.SystemTelemetrySnapshot
 import com.hzzmonet.zkbomb.domain.model.ProcessClassifier
 import java.io.File
@@ -18,99 +20,39 @@ import java.io.File
 /**
  * Read-only Task Manager and Stats Core backend.
  *
- * Process discovery and PSS come from ActivityManager, where REAL_GET_TASKS is
- * checked by system_server. Procfs is only used for optional counters; a denial
- * turns those individual fields into null and never makes the entire snapshot
- * fail. This keeps the API truthful across kernels and SELinux policy versions.
+ * Process discovery comes from ActivityManager. The process list uses only
+ * optional procfs counters; expensive PSS/private-dirty sampling is isolated in
+ * [selectedProcessMemory] and always targets exactly one validated PID.
  */
 class ProcessTelemetryBackend(
     private val context: Context,
     private val activityManager: ActivityManager? =
         context.getSystemService(ActivityManager::class.java),
-    private val proc: ProcStatReader = ProcStatReader(),
 ) {
+    private val proc = ProcStatReader()
+    private val processSnapshots = ProcessSnapshotBackend(
+        inventory = AndroidProcessInventory(context, activityManager),
+        memorySource = AndroidSelectedProcessMemorySource(activityManager),
+        proc = proc,
+        elapsedRealtime = SystemClock::elapsedRealtime,
+    )
 
-    fun processSnapshot(): ProcessSnapshot {
-        val all = runningProcesses()
-        val selected = all.take(MAX_PROCESSES)
-        val memoryByPid = readMemory(selected.map { it.pid })
+    fun processSnapshot(): ProcessSnapshot = processSnapshots.processSnapshot()
 
-        val processes = selected.mapNotNull { running ->
-            val name = running.processName?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val stat = proc.readProcess(running.pid)
-            val memory = memoryByPid[running.pid]
-            val packages = running.pkgList
-                ?.asSequence()
-                ?.filter { it.isNotBlank() }
-                ?.map { it.take(MAX_NAME_LENGTH) }
-                ?.distinct()
-                ?.take(MAX_PACKAGES_PER_PROCESS)
-                ?.toList()
-                .orEmpty()
-                .ifEmpty {
-                    context.packageManager.getPackagesForUid(running.uid)
-                        ?.asSequence()
-                        ?.map { it.take(MAX_NAME_LENGTH) }
-                        ?.take(MAX_PACKAGES_PER_PROCESS)
-                        ?.toList()
-                        .orEmpty()
-                }
-
-            val rssKiB = runCatching {
-                memory?.javaClass?.getMethod("getTotalRss")?.invoke(memory) as? Int
-            }.getOrNull()
-
-            val category = ProcessClassifier.classify(
-                processName = name,
-                packageNames = packages,
-                uid = running.uid,
-            )
-
-            ProcessInfo(
-                pid = running.pid,
-                uid = running.uid,
-                // UserHandle.getUserId is hidden from the public SDK. Android's
-                // multi-user UID layout is a stable 100000-wide range.
-                userId = running.uid / PER_USER_RANGE,
-                processName = name.take(MAX_NAME_LENGTH),
-                packageNames = packages,
-                importance = running.importance,
-                importanceReasonCode = running.importanceReasonCode,
-                foreground = running.importance <=
-                    ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE,
-                pssBytes = memory?.totalPss
-                    ?.takeIf { it > 0 }
-                    ?.toLong()
-                    ?.times(KIBIBYTE),
-                privateDirtyBytes = memory?.totalPrivateDirty
-                    ?.takeIf { it > 0 }
-                    ?.toLong()
-                    ?.times(KIBIBYTE),
-                rssBytes = rssKiB?.takeIf { it > 0 }?.toLong()?.times(KIBIBYTE),
-                cpuTimeTicks = stat?.cpuTimeTicks,
-                threadCount = stat?.threadCount,
-                startTimeTicks = stat?.startTimeTicks,
-                categoryName = category.name,
-            )
-        }
-
-        return ProcessSnapshot(
-            sampledAtElapsedRealtimeMillis = SystemClock.elapsedRealtime(),
-            processes = processes,
-            truncated = all.size > selected.size,
-        )
-    }
+    fun selectedProcessMemory(pid: Int): SelectedProcessMemory =
+        processSnapshots.selectedProcessMemory(pid)
 
     /** An actual visibility measurement; seeing only Bomb does not count. */
     fun hasGlobalProcessVisibility(): Boolean =
-        runningProcesses().any { it.uid != Process.myUid() }
+        processSnapshots.hasGlobalProcessVisibility(Process.myUid())
 
     /** Per-process CPU/thread data is supported only if another process is readable. */
     fun hasOtherProcessStatAccess(): Boolean =
-        runningProcesses().asSequence()
-            .filter { it.pid != Process.myPid() }
-            .take(PROBE_PROCESS_LIMIT)
-            .any { proc.readProcess(it.pid) != null }
+        processSnapshots.hasOtherProcessStatAccess(Process.myPid())
+
+    /** Real one-PID probe; a failed/disappeared candidate is never replaced. */
+    fun hasSelectedProcessMemoryAccess(): Boolean =
+        processSnapshots.probeSelectedProcessMemory(excludedPid = Process.myPid())
 
     fun hasSystemCpuAccess(): Boolean = proc.readCpuTotals() != null
 
@@ -165,35 +107,202 @@ class ProcessTelemetryBackend(
         )
     }
 
-    private fun runningProcesses(): List<ActivityManager.RunningAppProcessInfo> =
-        runCatching { activityManager?.runningAppProcesses.orEmpty() }
+}
+
+internal data class ObservedProcess(
+    val pid: Int,
+    val uid: Int,
+    val processName: String?,
+    val packageNames: List<String>,
+    val importance: Int,
+    val importanceReasonCode: Int,
+    val foreground: Boolean,
+)
+
+internal fun interface ProcessInventory {
+    fun runningProcesses(): List<ObservedProcess>
+}
+
+internal data class ProcessMemoryReading(
+    val pssBytes: Long?,
+    val privateDirtyBytes: Long?,
+    val rssBytes: Long?,
+) {
+    val hasAnyMetric: Boolean
+        get() = pssBytes != null || privateDirtyBytes != null || rssBytes != null
+}
+
+internal fun interface SelectedProcessMemorySource {
+    /** Samples [pid] only. Implementations must never substitute or batch another PID. */
+    fun read(pid: Int): ProcessMemoryReading?
+}
+
+internal interface ProcessProcReader {
+    fun readProcess(pid: Int): ProcProcessStat?
+    fun readRssBytes(pid: Int): Long?
+    fun readCpuTotals(): CpuTotals?
+}
+
+internal class ProcessSnapshotBackend(
+    private val inventory: ProcessInventory,
+    private val memorySource: SelectedProcessMemorySource,
+    private val proc: ProcessProcReader,
+    private val elapsedRealtime: () -> Long,
+) {
+    fun processSnapshot(): ProcessSnapshot {
+        val all = inventorySnapshot()
+        val selected = all.take(MAX_PROCESSES)
+        val processes = selected.mapNotNull { running ->
+            val name = running.processName?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val stat = runCatching { proc.readProcess(running.pid) }.getOrNull()
+            val packages = running.packageNames.asSequence()
+                .filter { it.isNotBlank() }
+                .map { it.take(MAX_NAME_LENGTH) }
+                .distinct()
+                .take(MAX_PACKAGES_PER_PROCESS)
+                .toList()
+            val category = ProcessClassifier.classify(name, packages, running.uid)
+
+            ProcessInfo(
+                pid = running.pid,
+                uid = running.uid,
+                userId = running.uid / PER_USER_RANGE,
+                processName = name.take(MAX_NAME_LENGTH),
+                packageNames = packages,
+                importance = running.importance,
+                importanceReasonCode = running.importanceReasonCode,
+                foreground = running.foreground,
+                pssBytes = null,
+                privateDirtyBytes = null,
+                rssBytes = runCatching { proc.readRssBytes(running.pid) }.getOrNull(),
+                cpuTimeTicks = stat?.cpuTimeTicks,
+                threadCount = stat?.threadCount,
+                startTimeTicks = stat?.startTimeTicks,
+                categoryName = category.name,
+            )
+        }
+        return ProcessSnapshot(
+            sampledAtElapsedRealtimeMillis = elapsedRealtime(),
+            processes = processes,
+            truncated = all.size > selected.size,
+        )
+    }
+
+    fun selectedProcessMemory(pid: Int): SelectedProcessMemory {
+        if (pid <= 0) return unavailable(pid, SelectedProcessMemoryStatus.INVALID_PID)
+        val selected = visibleProcesses().firstOrNull { it.pid == pid }
+        if (selected == null) {
+            return unavailable(pid, SelectedProcessMemoryStatus.NOT_VISIBLE)
+        }
+
+        val reading = runCatching { memorySource.read(pid) }.getOrNull()
+        val observedAfterSample = visibleProcesses().firstOrNull { it.pid == pid }
+        if (
+            observedAfterSample == null ||
+            observedAfterSample.uid != selected.uid ||
+            observedAfterSample.processName != selected.processName
+        ) {
+            return unavailable(pid, SelectedProcessMemoryStatus.DISAPPEARED)
+        }
+        if (reading == null || !reading.hasAnyMetric) {
+            return unavailable(pid, SelectedProcessMemoryStatus.UNAVAILABLE)
+        }
+        return SelectedProcessMemory(
+            pid = pid,
+            sampledAtElapsedRealtimeMillis = elapsedRealtime(),
+            status = SelectedProcessMemoryStatus.AVAILABLE.name,
+            pssBytes = reading.pssBytes,
+            privateDirtyBytes = reading.privateDirtyBytes,
+            rssBytes = reading.rssBytes,
+        )
+    }
+
+    fun probeSelectedProcessMemory(excludedPid: Int = -1): Boolean {
+        val candidate = visibleProcesses().firstOrNull { it.pid != excludedPid } ?: return false
+        return selectedProcessMemory(candidate.pid).available
+    }
+
+    fun hasGlobalProcessVisibility(selfUid: Int): Boolean =
+        inventorySnapshot().any { it.uid != selfUid }
+
+    fun hasOtherProcessStatAccess(selfPid: Int): Boolean =
+        inventorySnapshot().asSequence()
+            .filter { it.pid != selfPid }
+            .take(PROBE_PROCESS_LIMIT)
+            .any { runCatching { proc.readProcess(it.pid) }.getOrNull() != null }
+
+    private fun visibleProcesses(): List<ObservedProcess> =
+        inventorySnapshot().take(MAX_PROCESSES)
+
+    private fun inventorySnapshot(): List<ObservedProcess> =
+        runCatching { inventory.runningProcesses() }
             .getOrDefault(emptyList())
             .asSequence()
-            .filter { it.pid > 0 && it.uid >= 0 }
+            .filter { it.pid > 0 && it.uid >= 0 && !it.processName.isNullOrBlank() }
             .distinctBy { it.pid }
             .sortedWith(compareBy({ it.importance }, { it.pid }))
             .toList()
 
-    private fun readMemory(pids: List<Int>): Map<Int, android.os.Debug.MemoryInfo> {
-        val manager = activityManager ?: return emptyMap()
-        val result = LinkedHashMap<Int, android.os.Debug.MemoryInfo>()
-        pids.chunked(MEMORY_BATCH_SIZE).forEach { batch ->
-            val values = runCatching { manager.getProcessMemoryInfo(batch.toIntArray()) }
-                .getOrNull()
-                ?: return@forEach
-            batch.indices.forEach { index -> values.getOrNull(index)?.let { result[batch[index]] = it } }
-        }
-        return result
-    }
+    private fun unavailable(pid: Int, status: SelectedProcessMemoryStatus): SelectedProcessMemory =
+        SelectedProcessMemory.unavailable(pid, elapsedRealtime(), status)
 
     private companion object {
         const val MAX_PROCESSES = 192
         const val MAX_PACKAGES_PER_PROCESS = 16
         const val MAX_NAME_LENGTH = 256
-        const val MEMORY_BATCH_SIZE = 32
         const val PROBE_PROCESS_LIMIT = 8
-        const val KIBIBYTE = 1024L
         const val PER_USER_RANGE = 100_000
+    }
+}
+
+private class AndroidProcessInventory(
+    private val context: Context,
+    private val activityManager: ActivityManager?,
+) : ProcessInventory {
+    override fun runningProcesses(): List<ObservedProcess> =
+        activityManager?.runningAppProcesses.orEmpty().map { running ->
+            val packages = running.pkgList
+                ?.asSequence()
+                ?.filter { it.isNotBlank() }
+                ?.toList()
+                .orEmpty()
+                .ifEmpty {
+                    runCatching { context.packageManager.getPackagesForUid(running.uid).orEmpty().toList() }
+                        .getOrDefault(emptyList())
+                }
+            ObservedProcess(
+                pid = running.pid,
+                uid = running.uid,
+                processName = running.processName,
+                packageNames = packages,
+                importance = running.importance,
+                importanceReasonCode = running.importanceReasonCode,
+                foreground = running.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE,
+            )
+        }
+}
+
+private class AndroidSelectedProcessMemorySource(
+    private val activityManager: ActivityManager?,
+) : SelectedProcessMemorySource {
+    override fun read(pid: Int): ProcessMemoryReading? {
+        val manager = activityManager ?: return null
+        val memory = manager.getProcessMemoryInfo(intArrayOf(pid)).singleOrNull() ?: return null
+        val rssKiB = runCatching {
+            memory.javaClass.getMethod("getTotalRss").invoke(memory) as? Int
+        }.getOrNull()
+        return ProcessMemoryReading(
+            pssBytes = memory.totalPss.positiveKiBToBytes(),
+            privateDirtyBytes = memory.totalPrivateDirty.positiveKiBToBytes(),
+            rssBytes = rssKiB.positiveKiBToBytes(),
+        )
+    }
+
+    private fun Int?.positiveKiBToBytes(): Long? =
+        this?.takeIf { it > 0 }?.toLong()?.times(KIBIBYTE)
+
+    private companion object {
+        const val KIBIBYTE = 1024L
     }
 }
 
@@ -234,6 +343,15 @@ internal object ProcStatParser {
         )
     }
 
+    fun parseRssBytes(status: String): Long? {
+        val rssLine = status.lineSequence().firstOrNull { it.startsWith("VmRSS:") } ?: return null
+        val fields = rssLine.trim().split(WHITESPACE)
+        if (fields.size != 3 || fields[0] != "VmRSS:" || fields[2] != "kB") return null
+        val rssKiB = fields[1].toLongOrNull()?.takeIf { it > 0 } ?: return null
+        if (rssKiB > Long.MAX_VALUE / KIBIBYTE) return null
+        return rssKiB * KIBIBYTE
+    }
+
     private val WHITESPACE = Regex("\\s+")
     private const val USER_TIME_INDEX = 11
     private const val SYSTEM_TIME_INDEX = 12
@@ -241,17 +359,25 @@ internal object ProcStatParser {
     private const val START_TIME_INDEX = 19
     private const val IDLE_INDEX = 3
     private const val IOWAIT_INDEX = 4
+    private const val KIBIBYTE = 1024L
 }
 
-class ProcStatReader(private val root: File = File("/proc")) {
-    fun readProcess(pid: Int): ProcProcessStat? {
+internal class ProcStatReader(private val root: File = File("/proc")) : ProcessProcReader {
+    override fun readProcess(pid: Int): ProcProcessStat? {
         if (pid <= 0) return null
         return runCatching {
             ProcStatParser.parseProcess(File(root, "$pid/stat").readText())
         }.getOrNull()
     }
 
-    fun readCpuTotals(): CpuTotals? = runCatching {
+    override fun readRssBytes(pid: Int): Long? {
+        if (pid <= 0) return null
+        return runCatching {
+            ProcStatParser.parseRssBytes(File(root, "$pid/status").readText())
+        }.getOrNull()
+    }
+
+    override fun readCpuTotals(): CpuTotals? = runCatching {
         val first = File(root, "stat").bufferedReader().use { it.readLine() }
         ProcStatParser.parseCpuTotals(first)
     }.getOrNull()

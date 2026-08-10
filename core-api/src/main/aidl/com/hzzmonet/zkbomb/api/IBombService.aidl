@@ -2,12 +2,18 @@ package com.hzzmonet.zkbomb.api;
 
 import com.hzzmonet.zkbomb.api.BombCapabilities;
 import com.hzzmonet.zkbomb.api.BombResult;
+import com.hzzmonet.zkbomb.api.FirewallRuleParcel;
 import com.hzzmonet.zkbomb.api.FreezeStatus;
 import com.hzzmonet.zkbomb.api.LogStatus;
 import com.hzzmonet.zkbomb.api.MemoryConfig;
 import com.hzzmonet.zkbomb.api.MemoryStatus;
+import com.hzzmonet.zkbomb.api.PackageSnapshot;
 import com.hzzmonet.zkbomb.api.ProcessSnapshot;
+import com.hzzmonet.zkbomb.api.SelectedProcessMemory;
+import com.hzzmonet.zkbomb.api.SettingsAssignmentParcel;
+import com.hzzmonet.zkbomb.api.SettingsOverrideParcel;
 import com.hzzmonet.zkbomb.api.SystemTelemetrySnapshot;
+import com.hzzmonet.zkbomb.api.VisibilityCallerPolicyParcel;
 
 /**
  * The privileged surface. Everything the UI can ask Bomb to do passes through
@@ -162,5 +168,143 @@ interface IBombService {
      * Alias/convenience method for getSystemTelemetrySnapshot().
      */
     SystemTelemetrySnapshot getTelemetrySnapshot();
-}
 
+    // ---- Appended in contract version 5 ------------------------------------
+
+    /** Current-user package metadata and a bounded manifest component list. */
+    PackageSnapshot getPackageSnapshot(String packageName, int userId);
+
+    /** Force-stop one installed, non-protected package and verify it stopped. */
+    BombResult forceStopPackage(String packageName, int userId);
+
+    /**
+     * Apply DEFAULT, ENABLED or DISABLED to one component that the service has
+     * verified belongs to packageName. No arbitrary ComponentName is accepted.
+     */
+    BombResult setComponentState(String packageName, int userId, String className, String state);
+
+    // ---- Appended in contract version 6 — Phase 3: Visibility / Settings / Firewall / AdBlock ----
+
+    // --- App Visibility (§12) ---
+
+    /**
+     * Register or replace the caller-scoped visibility policy for [callingUid]/[userId].
+     *
+     * The [policy] carries the mode (BLACKLIST or WHITELIST) and the package set.
+     * The service reloads the in-memory [VisibilityPolicySnapshot] atomically after
+     * accepting the write. Package names are validated server-side.
+     *
+     * Requires PACKAGE_VISIBILITY_VIRTUALIZATION capability (ROM-mode only).
+     */
+    BombResult setVisibilityPolicy(in VisibilityCallerPolicyParcel policy);
+
+    /**
+     * Remove the visibility policy for [callingUid]/[userId], restoring default
+     * (all packages visible) for that caller.
+     */
+    BombResult clearVisibilityPolicy(int callingUid, int userId);
+
+    // --- Per-App Settings Virtualization (§13) ---
+
+    /**
+     * Create or replace a named settings profile.
+     *
+     * [profileId] is 1..128 characters from [A-Za-z0-9._-].
+     * [profileName] is a 1..256 character human-readable label.
+     *
+     * Overrides are added separately via [addSettingsOverride].
+     */
+    BombResult createSettingsProfile(String profileId, String profileName);
+
+    /**
+     * Delete a settings profile and all its overrides.
+     *
+     * Any assignments pointing to [profileId] become no-ops (PassThrough) after
+     * deletion until the caller assigns a new profile.
+     */
+    BombResult deleteSettingsProfile(String profileId);
+
+    /**
+     * Add or replace one [SettingsOverrideParcel] in the given profile.
+     *
+     * The service validates [override.namespace] and [override.valueType] as known
+     * enum names, accepts only classified APP_READ keys, and requires canonical
+     * typed values (including BOOLEAN "0"/"1" and a null NULL value). Unknown,
+     * SYSTEM_READ, PER_APP_CONFIG and FORBIDDEN keys are rejected. The real
+     * setting is NEVER mutated.
+     */
+    BombResult addSettingsOverride(in SettingsOverrideParcel override);
+
+    /**
+     * Remove one override (identified by profileId + namespace + key) from a profile.
+     */
+    BombResult removeSettingsOverride(String profileId, String namespace, String key);
+
+    /**
+     * Assign [profileId] to a (userId, targetPackage) pair.
+     *
+     * Settings reads from [targetPackage] under [userId] will be intercepted and
+     * the virtual value returned when an active override matches. Last call wins —
+     * a package can only hold one active profile assignment at a time.
+     */
+    BombResult assignSettingsProfile(in SettingsAssignmentParcel assignment);
+
+    /**
+     * Clear the settings profile assignment for (userId, targetPackage).
+     *
+     * After clearing, the app reads real settings again.
+     */
+    BombResult clearSettingsAssignment(int userId, String targetPackage);
+
+    // --- Firewall per-app/UID policy (§18) ---
+
+    /**
+     * Set or replace the firewall policy for one app UID.
+     *
+     * [rule] carries Wi-Fi / mobile / background access states as ALLOW or DENY
+     * names. The service applies the policy to the network policy engine and
+     * verifies the write.
+     *
+     * Requires FIREWALL capability.
+     */
+    BombResult setFirewallRule(in FirewallRuleParcel rule);
+
+    /**
+     * Remove the firewall policy for [uid]/[userId], restoring platform defaults
+     * (all interfaces allowed) for that UID.
+     */
+    BombResult clearFirewallRule(int uid, int userId);
+
+    // --- AdBlock atomic blocklist reload (§16) ---
+
+    /**
+     * Trigger an atomic blocklist compile-and-swap from the current source data.
+     *
+     * The server:
+     *   1. parses the current raw source;
+     *   2. normalizes and deduplicates;
+     *   3. applies allow rules;
+     *   4. compiles to an immutable [Blocklist];
+     *   5. atomically swaps the active blocklist.
+     *
+     * Returns FAILED if the compiled result has fewer than MIN_VALID_RULES (the
+     * previous active blocklist is kept in that case, per §16 "If update fails,
+     * keep the previous working blockset").
+     *
+     * Returns UNSUPPORTED when AD_BLOCK capability is absent.
+     */
+    BombResult reloadAdBlockRules();
+
+    // ---- Appended in contract version 7 ------------------------------------
+
+    /**
+     * Sample expensive memory counters for exactly one visible process.
+     *
+     * The service validates that [pid] is positive and belongs to the same
+     * bounded process inventory returned by [getProcessSnapshot]. It never
+     * substitutes another PID. Unavailable, unreadable and disappeared states
+     * are returned explicitly with nullable metrics rather than zero values.
+     */
+    SelectedProcessMemory getSelectedProcessMemory(int pid);
+
+}

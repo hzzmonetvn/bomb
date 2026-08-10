@@ -132,8 +132,10 @@ fun BombProcessRow(
     name: String,
     processName: String,
     pid: Int,
-    cpuPercent: Float,
-    memoryMb: Int,
+    // Nullable on purpose: a snapshot the framework withheld a value from shows
+    // "—", never a fabricated 0.
+    cpuPercent: Float?,
+    memoryMb: Int?,
     tint: Color,
     modifier: Modifier = Modifier,
     state: String? = null,
@@ -173,13 +175,17 @@ fun BombProcessRow(
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(
-                text = "${formatOneDecimal(cpuPercent)}%",
+                text = cpuPercent?.let { "${formatOneDecimal(it)}%" } ?: "—",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = BombTheme.colors.cpu,
+                color = if (cpuPercent != null) {
+                    BombTheme.colors.cpu
+                } else {
+                    BombTheme.miuix.onSurfaceVariantSummary
+                },
             )
             Text(
-                text = "$memoryMb MB",
+                text = memoryMb?.let { "$it MB" } ?: "—",
                 modifier = Modifier.padding(top = 2.dp),
                 fontSize = 12.sp,
                 color = BombTheme.miuix.onSurfaceVariantSummary,

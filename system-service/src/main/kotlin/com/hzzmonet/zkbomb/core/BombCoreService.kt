@@ -7,15 +7,23 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.Process
 import com.hzzmonet.zkbomb.api.BombCapabilities
+import com.hzzmonet.zkbomb.api.BombCapability
 import com.hzzmonet.zkbomb.api.BombResult
 import com.hzzmonet.zkbomb.api.BombRuntimeMode
+import com.hzzmonet.zkbomb.api.FirewallRuleParcel
 import com.hzzmonet.zkbomb.api.FreezeStatus
 import com.hzzmonet.zkbomb.api.IBombService
 import com.hzzmonet.zkbomb.api.LogStatus
 import com.hzzmonet.zkbomb.api.MemoryConfig
 import com.hzzmonet.zkbomb.api.MemoryStatus
+import com.hzzmonet.zkbomb.api.PackageSnapshot
 import com.hzzmonet.zkbomb.api.ProcessSnapshot
+import com.hzzmonet.zkbomb.api.SelectedProcessMemory
+import com.hzzmonet.zkbomb.api.SelectedProcessMemoryStatus
+import com.hzzmonet.zkbomb.api.SettingsAssignmentParcel
+import com.hzzmonet.zkbomb.api.SettingsOverrideParcel
 import com.hzzmonet.zkbomb.api.SystemTelemetrySnapshot
+import com.hzzmonet.zkbomb.api.VisibilityCallerPolicyParcel
 import com.hzzmonet.zkbomb.domain.freeze.FreezeMode
 import com.hzzmonet.zkbomb.domain.freeze.PackageNameValidator
 import com.hzzmonet.zkbomb.domain.log.LogLevel
@@ -24,6 +32,9 @@ import com.hzzmonet.zkbomb.domain.log.LogTransitionPlanner
 import com.hzzmonet.zkbomb.domain.log.LogTransition
 import com.hzzmonet.zkbomb.domain.memory.ZramConfig
 import com.hzzmonet.zkbomb.domain.memory.ZramConfigValidator
+import com.hzzmonet.zkbomb.domain.model.CapabilityKey
+import com.hzzmonet.zkbomb.domain.settings.SettingsNamespace
+import com.hzzmonet.zkbomb.domain.validation.ApiV6InputValidator
 
 /**
  * The bound service behind [IBombService].
@@ -49,6 +60,7 @@ class BombCoreService : Service() {
     private val controlWriter by lazy { RomControlPropertyWriter() }
     private val zramReader by lazy { ZramReader() }
     private val freezeBackend by lazy { FreezeBackend(this) }
+    private val packageControl by lazy { PackageControlBackend(this, freezeBackend) }
     private val processTelemetry by lazy { ProcessTelemetryBackend(this) }
     private val logReader by lazy { LogStateReader(properties) }
     private val modeDetector by lazy { RuntimeModeDetector(this, properties) }
@@ -61,9 +73,27 @@ class BombCoreService : Service() {
             controlWriter,
             freezeBackend,
             processTelemetry,
+            packageControl,
         )
     }
     private val logPlanner = LogTransitionPlanner()
+
+    // ---- Phase 3 backends --------------------------------------------------
+
+    private val visibilityBackend by lazy {
+        VisibilityBackend(
+            packageManager = packageManager,
+            bombPackageName = packageName,
+        )
+    }
+
+    private val settingsBackend by lazy { SettingsVirtualizationBackend() }
+
+    private val firewallBackend by lazy { FirewallBackend() }
+
+    private val adBlockEngine by lazy { AdBlockEngine() }
+
+    // -----------------------------------------------------------------------
 
     private val callerPolicy by lazy {
         CallerPolicy(
@@ -278,7 +308,243 @@ class BombCoreService : Service() {
             setFreezeMode(packageName, userId, freezeState)
 
         override fun getTelemetrySnapshot(): SystemTelemetrySnapshot? = getSystemTelemetrySnapshot()
+
+        // ---- Package Inspector / Component Control (contract version 5) ----
+
+        override fun getPackageSnapshot(packageName: String?, userId: Int): PackageSnapshot? {
+            if (!validator.isAllowed(Binder.getCallingUid())) return null
+            if (packageName == null || !PackageNameValidator.isValid(packageName) || userId < 0) {
+                return null
+            }
+            return packageControl.snapshot(packageName, userId)
+        }
+
+        override fun forceStopPackage(packageName: String?, userId: Int): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (packageName == null || !PackageNameValidator.isValid(packageName)) {
+                return BombResult.invalidArgument("packageName")
+            }
+            if (userId < 0) return BombResult.invalidArgument("userId")
+            return packageControl.forceStop(packageName, userId)
+        }
+
+        override fun setComponentState(
+            packageName: String?,
+            userId: Int,
+            className: String?,
+            state: String?,
+        ): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (packageName == null || !PackageNameValidator.isValid(packageName)) {
+                return BombResult.invalidArgument("packageName")
+            }
+            if (userId < 0) return BombResult.invalidArgument("userId")
+            if (className == null) return BombResult.invalidArgument("className")
+            if (state == null) return BombResult.invalidArgument("state")
+            return packageControl.setComponentState(packageName, userId, className, state)
+        }
+
+        // ---- Phase 3: App Visibility (§12) — contract version 6 ------------
+
+        override fun setVisibilityPolicy(policy: VisibilityCallerPolicyParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (policy == null) return BombResult.invalidArgument("policy must not be null")
+            if (policy.toDomain() == null) return BombResult.invalidArgument("policy")
+            validateCurrentUser(policy.userId)?.let { return it }
+
+            return executeFrameworkWrite(
+                BombCapability.PACKAGE_VISIBILITY_VIRTUALIZATION,
+                "PACKAGE_VISIBILITY_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                visibilityBackend.setPolicy(policy)
+            }
+        }
+
+        override fun clearVisibilityPolicy(callingUid: Int, userId: Int): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            ApiV6InputValidator.uidUserViolation(callingUid, userId)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            validateCurrentUser(userId)?.let { return it }
+            return executeFrameworkWrite(
+                BombCapability.PACKAGE_VISIBILITY_VIRTUALIZATION,
+                "PACKAGE_VISIBILITY_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                visibilityBackend.clearPolicy(callingUid, userId)
+            }
+        }
+
+        // ---- Phase 3: Settings Virtualization (§13) -------------------------
+
+        override fun createSettingsProfile(profileId: String?, profileName: String?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (profileId == null) return BombResult.invalidArgument("profileId")
+            if (profileName == null) return BombResult.invalidArgument("profileName")
+            ApiV6InputValidator.profileIdViolation(profileId)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            ApiV6InputValidator.profileNameViolation(profileName)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            return executeFrameworkWrite(
+                BombCapability.SETTINGS_VIRTUALIZATION,
+                "SETTINGS_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                settingsBackend.createProfile(profileId, profileName)
+            }
+        }
+
+        override fun deleteSettingsProfile(profileId: String?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (profileId == null) return BombResult.invalidArgument("profileId")
+            ApiV6InputValidator.profileIdViolation(profileId)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            return executeFrameworkWrite(
+                BombCapability.SETTINGS_VIRTUALIZATION,
+                "SETTINGS_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                settingsBackend.deleteProfile(profileId)
+            }
+        }
+
+        override fun addSettingsOverride(override: SettingsOverrideParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (override == null) return BombResult.invalidArgument("override must not be null")
+            if (override.toDomain() == null) return BombResult.invalidArgument("override")
+            return executeFrameworkWrite(
+                BombCapability.SETTINGS_VIRTUALIZATION,
+                "SETTINGS_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                settingsBackend.addOverride(override)
+            }
+        }
+
+        override fun removeSettingsOverride(
+            profileId: String?,
+            namespace: String?,
+            key: String?,
+        ): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (profileId == null) return BombResult.invalidArgument("profileId")
+            if (namespace == null) return BombResult.invalidArgument("namespace")
+            if (key == null) return BombResult.invalidArgument("key")
+            ApiV6InputValidator.profileIdViolation(profileId)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            ApiV6InputValidator.enumNameViolation("namespace", namespace)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            if (SettingsNamespace.entries.none { it.name == namespace }) {
+                return BombResult.invalidArgument("namespace")
+            }
+            ApiV6InputValidator.settingsKeyViolation(key)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            return executeFrameworkWrite(
+                BombCapability.SETTINGS_VIRTUALIZATION,
+                "SETTINGS_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                settingsBackend.removeOverride(profileId, namespace, key)
+            }
+        }
+
+        override fun assignSettingsProfile(assignment: SettingsAssignmentParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (assignment == null) return BombResult.invalidArgument("assignment must not be null")
+            if (assignment.toDomain() == null) return BombResult.invalidArgument("assignment")
+            validateCurrentUser(assignment.userId)?.let { return it }
+            return executeFrameworkWrite(
+                BombCapability.SETTINGS_VIRTUALIZATION,
+                "SETTINGS_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                settingsBackend.assignProfile(assignment)
+            }
+        }
+
+        override fun clearSettingsAssignment(userId: Int, targetPackage: String?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (targetPackage == null || !PackageNameValidator.isValid(targetPackage)) {
+                return BombResult.invalidArgument("targetPackage")
+            }
+            validateCurrentUser(userId)?.let { return it }
+            return executeFrameworkWrite(
+                BombCapability.SETTINGS_VIRTUALIZATION,
+                "SETTINGS_VIRTUALIZATION requires an acknowledged framework bridge",
+            ) {
+                settingsBackend.clearAssignment(userId, targetPackage)
+            }
+        }
+
+        // ---- Phase 3: Firewall (§18) ----------------------------------------
+
+        override fun setFirewallRule(rule: FirewallRuleParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (rule == null) return BombResult.invalidArgument("rule must not be null")
+            if (rule.toDomain() == null) return BombResult.invalidArgument("rule")
+            validateCurrentUser(rule.userId)?.let { return it }
+            val caps = capabilityProbe.probe()
+            if (!caps.isSupported(com.hzzmonet.zkbomb.api.BombCapability.FIREWALL)) {
+                return BombResult.unsupported("FIREWALL capability is not available on this device")
+            }
+            return firewallBackend.setRule(rule)
+        }
+
+        override fun clearFirewallRule(uid: Int, userId: Int): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            ApiV6InputValidator.uidUserViolation(uid, userId)?.let {
+                return BombResult.invalidArgument(it)
+            }
+            validateCurrentUser(userId)?.let { return it }
+            val caps = capabilityProbe.probe()
+            if (!caps.isSupported(com.hzzmonet.zkbomb.api.BombCapability.FIREWALL)) {
+                return BombResult.unsupported("FIREWALL capability is not available on this device")
+            }
+            return firewallBackend.clearRule(uid, userId)
+        }
+
+        // ---- Phase 3: AdBlock (§16) -----------------------------------------
+
+        override fun reloadAdBlockRules(): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val caps = capabilityProbe.probe()
+            if (!caps.isSupported(com.hzzmonet.zkbomb.api.BombCapability.AD_BLOCK)) {
+                return BombResult.unsupported("AD_BLOCK capability is not available on this device")
+            }
+            return adBlockEngine.reloadAndSwap()
+        }
+
+        // ---- Selected-process memory (contract version 7) ------------------
+
+        override fun getSelectedProcessMemory(pid: Int): SelectedProcessMemory {
+            if (!validator.isAllowed(Binder.getCallingUid())) {
+                return SelectedProcessMemory.unavailable(
+                    pid = pid,
+                    sampledAtElapsedRealtimeMillis = android.os.SystemClock.elapsedRealtime(),
+                    status = SelectedProcessMemoryStatus.PERMISSION_DENIED,
+                )
+            }
+            if (pid <= 0) {
+                return SelectedProcessMemory.unavailable(
+                    pid = pid,
+                    sampledAtElapsedRealtimeMillis = android.os.SystemClock.elapsedRealtime(),
+                    status = SelectedProcessMemoryStatus.INVALID_PID,
+                )
+            }
+            return processTelemetry.selectedProcessMemory(pid)
+        }
+
     }
+
+    private fun executeFrameworkWrite(
+        capability: BombCapability,
+        unavailableDetail: String,
+        mutation: () -> BombResult,
+    ): BombResult = FrameworkBridgeGate.executeWrite(
+        capabilityState = capabilityProbe.probe()[capability],
+        unavailableDetail = unavailableDetail,
+        mutation = mutation,
+    )
 
     /**
      * Both switches that claim to control Memory Extension, reported side by
@@ -312,6 +578,18 @@ class BombCoreService : Service() {
         )
     }
 
+    private fun validateCurrentUser(userId: Int): BombResult? {
+        ApiV6InputValidator.userIdViolation(userId)?.let {
+            return BombResult.invalidArgument(it)
+        }
+        val currentUserId = Process.myUid() / ApiV6InputValidator.PER_USER_RANGE
+        return if (userId == currentUserId) {
+            null
+        } else {
+            BombResult.unsupported("Cross-user operations are not integrated")
+        }
+    }
+
     private companion object {
         /**
          * Bumped only when methods are appended to [IBombService], never for an
@@ -320,8 +598,12 @@ class BombCoreService : Service() {
          * 2 — added `getRuntimeMode()`.
          * 3 — added process and system telemetry snapshots.
          * 4 — added getProcessList(), setFreezeState(), getTelemetrySnapshot().
+         * 5 — added Package Inspector, force-stop and component override calls.
+         * 6 — Phase 3: Visibility (§12), Settings Virtualization (§13),
+         *     Firewall (§18), AdBlock reload (§16).
+         * 7 — selected-process-only PSS/private-dirty memory sampling.
          */
-        const val API_VERSION = 4
+        const val API_VERSION = 7
         const val MEMORY_VERIFY_ATTEMPTS = 10
         const val MEMORY_VERIFY_DELAY_MS = 50L
         const val CONTROL_VERIFY_ATTEMPTS = 10

@@ -24,13 +24,17 @@ import com.hzzmonet.zkbomb.data.rememberBombService
 import com.hzzmonet.zkbomb.data.rememberBombSettings
 import com.hzzmonet.zkbomb.data.rememberInstallInfo
 import com.hzzmonet.zkbomb.data.rememberInstalledApps
+import com.hzzmonet.zkbomb.data.rememberProcessList
+import com.hzzmonet.zkbomb.data.rememberSystemTelemetry
 import com.hzzmonet.zkbomb.data.rememberSystemView
 import com.hzzmonet.zkbomb.data.rememberVoipRecorder
+import com.hzzmonet.zkbomb.ui.adblock.adBlockContent
 import com.hzzmonet.zkbomb.ui.apps.appControlContent
 import com.hzzmonet.zkbomb.ui.apps.appListContent
 import com.hzzmonet.zkbomb.ui.automation.automationContent
 import com.hzzmonet.zkbomb.ui.battery.batteryLabContent
 import com.hzzmonet.zkbomb.ui.bridge.bridgeContent
+import com.hzzmonet.zkbomb.ui.firewall.firewallContent
 import com.hzzmonet.zkbomb.ui.dashboard.homeContent
 import com.hzzmonet.zkbomb.ui.appearance.appearanceContent
 import com.hzzmonet.zkbomb.ui.design.BackdropImageState
@@ -49,6 +53,8 @@ import com.hzzmonet.zkbomb.ui.mode.executionModeContent
 import com.hzzmonet.zkbomb.ui.logs.logGovernorContent
 import com.hzzmonet.zkbomb.ui.more.moreContent
 import com.hzzmonet.zkbomb.ui.network.networkContent
+import com.hzzmonet.zkbomb.ui.privacy.appVisibilityContent
+import com.hzzmonet.zkbomb.ui.privacy.settingsVirtualizationContent
 import com.hzzmonet.zkbomb.ui.navigation.BombBottomBar
 import com.hzzmonet.zkbomb.ui.navigation.BombBackHandler
 import com.hzzmonet.zkbomb.ui.navigation.BombRoute
@@ -156,6 +162,23 @@ private fun BombAppShell(
     // collects a process-wide state flow, and one collector for the app avoids a
     // fresh subscription on every screen that shows recorder status.
     val recorder = rememberVoipRecorder()
+    // Privileged process/telemetry pollers. Hosted here (not inside a LazyColumn
+    // item, which recycles) so a delta baseline is not lost on scroll, but gated
+    // by route so sampling runs only while the screen that needs it is shown —
+    // the "stop when the screen leaves" the Refresh card promises.
+    val processList = rememberProcessList(
+        service = service,
+        active = route == BombRoute.TaskManager,
+        intervalMillis = state.samplingIntervalMillis,
+    )
+    val telemetry = rememberSystemTelemetry(
+        service = service,
+        // Monitor and Task Manager share this one telemetry poller — the single
+        // CPU/RAM pipeline. It stays off on every other route, so sampling still
+        // stops when neither screen is shown.
+        active = route == BombRoute.Monitor || route == BombRoute.TaskManager,
+        intervalMillis = state.samplingIntervalMillis,
+    )
 
     Crossfade(
         targetState = route,
@@ -195,10 +218,10 @@ private fun BombAppShell(
             when (targetRoute) {
                 BombRoute.Home -> homeContent(state, navigator, system, service, install)
                 BombRoute.Apps -> appListContent(state, navigator, apps)
-                BombRoute.Monitor -> monitorContent(state, system)
+                BombRoute.Monitor -> monitorContent(state, system, telemetry)
                 BombRoute.Automation -> automationContent(navigator)
                 BombRoute.More -> moreContent(state, navigator)
-                BombRoute.TaskManager -> taskManagerContent(state, navigator, system)
+                BombRoute.TaskManager -> taskManagerContent(state, navigator, service, telemetry, processList)
                 BombRoute.Freeze -> freezeContent(state, navigator, service, apps)
                 BombRoute.Performance -> performanceContent(state, service)
                 BombRoute.BatteryLab -> batteryLabContent(state, system, service)
@@ -210,7 +233,11 @@ private fun BombAppShell(
                 BombRoute.VoipPicker -> voipPickerContent(state, apps)
                 BombRoute.ExecutionMode -> executionModeContent(service, install)
                 BombRoute.Appearance -> appearanceContent(state, backdropImage)
-                is BombRoute.ProcessDetail -> processDetailContent(state, targetRoute.pid, navigator)
+                BombRoute.AppVisibility -> appVisibilityContent(service, apps)
+                BombRoute.SettingsVirtualization -> settingsVirtualizationContent(service, apps)
+                BombRoute.AdBlock -> adBlockContent(service)
+                BombRoute.Firewall -> firewallContent(service, apps)
+                is BombRoute.ProcessDetail -> processDetailContent(targetRoute.pid, navigator, service, processList)
                 is BombRoute.AppControl -> appControlContent(state, targetRoute.packageName, navigator, apps, service)
             }
         }

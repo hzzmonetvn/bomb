@@ -30,6 +30,14 @@ class PreviewUiState(
     // Task Manager
     val processQuery = TextFieldState()
     var selectedProcessPid by mutableStateOf<Int?>(null)
+
+    /**
+     * Start-time ticks of the selected process, captured at selection.
+     *
+     * The PID alone is not an identity — it can be reused by another process. This
+     * pins the exact generation so the memory view can refuse a mismatched sample.
+     */
+    var selectedProcessStartTicks by mutableStateOf<Long?>(null)
     var processSort by mutableStateOf(0)
     var processFilter by mutableStateOf(0)
     var refreshLevel by intPreference("task.refresh_level", 2)

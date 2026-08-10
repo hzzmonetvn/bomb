@@ -18,6 +18,8 @@ enum class BombCapability {
     TASK_MANAGER,
     PROCESS_CPU_TELEMETRY,
     THREAD_TELEMETRY,
+    /** Expensive PSS/private-dirty sampling for one explicitly selected PID. */
+    PROCESS_PSS_TELEMETRY,
     GPU_TELEMETRY,
     FPS_TELEMETRY,
     THERMAL_TELEMETRY,
@@ -30,6 +32,8 @@ enum class BombCapability {
     DEEP_FREEZE,
     COMPONENT_CONTROL,
     FRAMEWORK_PROCESS_CONTROL,
+    /** Typed force-stop of a validated, non-protected package. */
+    PACKAGE_FORCE_STOP,
 
     // ---- Framework patches. ROM mode only, per D6. ----
     PACKAGE_VISIBILITY_VIRTUALIZATION,

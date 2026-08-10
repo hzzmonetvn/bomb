@@ -30,4 +30,15 @@ class ProcStatParserTest {
         assertNull(ProcStatParser.parseProcess("not a stat line"))
         assertNull(ProcStatParser.parseCpuTotals("cpu 1 nope 3 4"))
     }
+
+    @Test
+    fun `process status parses VmRSS in bytes and refuses missing or zero values`() {
+        assertEquals(
+            12_345L * 1024L,
+            ProcStatParser.parseRssBytes("Name:\tworker\nVmRSS:\t   12345 kB\nThreads:\t4\n"),
+        )
+        assertNull(ProcStatParser.parseRssBytes("Name:\tworker\nThreads:\t4\n"))
+        assertNull(ProcStatParser.parseRssBytes("VmRSS:\t0 kB\n"))
+        assertNull(ProcStatParser.parseRssBytes("VmRSS:\t12 MB\n"))
+    }
 }

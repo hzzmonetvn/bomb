@@ -30,6 +30,11 @@ class FreezeBackend(private val context: Context) {
     private val pm: PackageManager get() = context.packageManager
     private val activityManager: ActivityManager?
         get() = context.getSystemService(ActivityManager::class.java)
+    private val forceStopVerifier = ForceStopVerifier(
+        attempts = FORCE_STOP_VERIFY_ATTEMPTS,
+        delayMillis = FORCE_STOP_VERIFY_DELAY_MS,
+        sleep = { delayMillis -> android.os.SystemClock.sleep(delayMillis) },
+    )
 
     fun status(packageName: String, userId: Int): FreezeStatus? {
         if (userId != currentUserId()) return null
@@ -78,7 +83,7 @@ class FreezeBackend(private val context: Context) {
     ): BombResult = runCatching {
         for (action in actions) {
             when (action) {
-                FreezeAction.ForceStop -> forceStop(packageName)
+                FreezeAction.ForceStop -> invokeForceStop(packageName)
                 is FreezeAction.SetMechanism -> setMechanism(packageName, action)
             }
         }
@@ -132,7 +137,7 @@ class FreezeBackend(private val context: Context) {
             FreezeMechanism.DISABLE -> pm.setApplicationEnabledSetting(
                 packageName,
                 if (action.engaged) {
-                    forceStop(packageName)
+                    invokeForceStop(packageName)
                     PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
                 } else {
                     PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
@@ -157,11 +162,54 @@ class FreezeBackend(private val context: Context) {
         }
     }
 
-    private fun forceStop(packageName: String) {
+    /** Typed force-stop shared by App Control and the Freeze Engine. */
+    fun forceStopPackage(packageName: String, userId: Int): BombResult {
+        if (userId != currentUserId()) {
+            return BombResult.unsupported("Cross-user force-stop is not integrated")
+        }
+        if (observe(packageName) == null) {
+            return BombResult.invalidArgument("Package is not installed for this user")
+        }
+        protectionReason(packageName)?.let { return BombResult.permissionDenied(it) }
+        if (!canForceStop()) {
+            return BombResult.unsupported("FORCE_STOP_PACKAGES is unavailable")
+        }
+
+        return runCatching {
+            invokeForceStop(packageName)
+            forceStopVerifier.verify(
+                stoppedFlag = { isStopped(packageName) },
+                processObservation = { processObservation(packageName) },
+            )
+        }.getOrElse { error ->
+            BombResult.failed(error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    fun protectionReason(packageName: String): String? =
+        protectedPackages().exclusionFor(packageName)?.name
+
+    fun canForceStop(): Boolean =
+        granted("android.permission.FORCE_STOP_PACKAGES") && forceStopAvailable()
+
+    private fun invokeForceStop(packageName: String) {
         val manager = activityManager ?: error("ActivityManager unavailable")
         val method = ActivityManager::class.java.getMethod("forceStopPackage", String::class.java)
         method.invoke(manager, packageName)
     }
+
+    private fun processObservation(packageName: String): ProcessObservation =
+        PackageProcessObserver {
+            activityManager?.runningAppProcesses?.map { process ->
+                process.pkgList?.toList()
+            }
+        }.observe(packageName)
+
+    private fun isStopped(packageName: String): Boolean =
+        runCatching {
+            pm.getApplicationInfo(packageName, PackageManager.MATCH_DISABLED_COMPONENTS)
+                .flags and ApplicationInfo.FLAG_STOPPED != 0
+        }.getOrDefault(false)
 
     private fun observe(packageName: String): ObservedFreezeState? {
         val info = runCatching { pm.getApplicationInfo(packageName, 0) }.getOrNull() ?: return null
@@ -261,6 +309,8 @@ class FreezeBackend(private val context: Context) {
     private fun currentUserId(): Int = Process.myUid() / PER_USER_RANGE
 
     private companion object {
+        const val FORCE_STOP_VERIFY_ATTEMPTS = 10
+        const val FORCE_STOP_VERIFY_DELAY_MS = 50L
         const val PER_USER_RANGE = 100_000
     }
 }

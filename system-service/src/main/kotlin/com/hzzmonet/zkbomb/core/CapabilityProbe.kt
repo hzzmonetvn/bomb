@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import com.hzzmonet.zkbomb.api.BombCapabilities
 import com.hzzmonet.zkbomb.api.BombCapability
+import com.hzzmonet.zkbomb.api.BombResult
 import com.hzzmonet.zkbomb.api.CapabilityState
 
 /**
@@ -28,6 +29,7 @@ class CapabilityProbe(
     private val controlWriter: RomControlPropertyWriter = RomControlPropertyWriter(),
     private val freeze: FreezeBackend = FreezeBackend(context),
     private val processTelemetry: ProcessTelemetryBackend = ProcessTelemetryBackend(context),
+    private val packageControl: PackageControlBackend = PackageControlBackend(context, freeze),
 ) {
 
     fun probe(): BombCapabilities {
@@ -58,6 +60,14 @@ class CapabilityProbe(
         builder.set(
             BombCapability.THREAD_TELEMETRY,
             if (readsOtherProcessStat) CapabilityState.SUPPORTED else CapabilityState.UNSUPPORTED,
+        )
+        builder.set(
+            BombCapability.PROCESS_PSS_TELEMETRY,
+            if (processTelemetry.hasSelectedProcessMemoryAccess()) {
+                CapabilityState.SUPPORTED
+            } else {
+                CapabilityState.UNSUPPORTED
+            },
         )
         builder.set(
             BombCapability.SYSTEM_CPU_TELEMETRY,
@@ -99,9 +109,17 @@ class CapabilityProbe(
         builder.set(BombCapability.SOFT_FREEZE, CapabilityState.REQUIRES_ROOT)
         builder.set(
             BombCapability.COMPONENT_CONTROL,
-            if (freezeCapabilities.disable) CapabilityState.SUPPORTED else CapabilityState.REQUIRES_ROOT,
+            if (packageControl.canControlComponents()) {
+                CapabilityState.SUPPORTED
+            } else {
+                CapabilityState.REQUIRES_ROOT
+            },
         )
         builder.set(BombCapability.FRAMEWORK_PROCESS_CONTROL, CapabilityState.REQUIRES_ROOT)
+        builder.set(
+            BombCapability.PACKAGE_FORCE_STOP,
+            if (freeze.canForceStop()) CapabilityState.SUPPORTED else CapabilityState.REQUIRES_ROOT,
+        )
 
         // ---- Framework patches ------------------------------------------------
         // ROM-mode only by decision D6: these are patches inside system_server,
@@ -196,11 +214,10 @@ class CapabilityProbe(
         context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
     private fun frameworkPatchState(romMode: Boolean, marker: String): CapabilityState =
-        if (romMode && properties.get(marker) == "1") {
-            CapabilityState.SUPPORTED
-        } else {
-            CapabilityState.UNSUPPORTED
-        }
+        FrameworkBridgeGate.markerOnlyCapabilityState(
+            romDeclared = romMode,
+            patchMarkerDeclared = properties.get(marker) == "1",
+        )
 
     private fun installed(packageName: String): Boolean = runCatching {
         context.packageManager.getPackageInfo(packageName, 0)
@@ -209,5 +226,32 @@ class CapabilityProbe(
 
     private companion object {
         const val MOSEY_PACKAGE = "com.google.android.mosey"
+    }
+}
+
+/**
+ * Fail-closed boundary for framework-owned features.
+ *
+ * A ROM/property marker describes image intent only. Until system_server exposes
+ * a real bridge handshake and acknowledges the applied policy revision, the
+ * service has no evidence that either framework hook can consume its state.
+ */
+internal object FrameworkBridgeGate {
+    fun markerOnlyCapabilityState(
+        romDeclared: Boolean,
+        patchMarkerDeclared: Boolean,
+    ): CapabilityState {
+        if (!romDeclared || !patchMarkerDeclared) return CapabilityState.UNSUPPORTED
+        return CapabilityState.UNSUPPORTED
+    }
+
+    fun executeWrite(
+        capabilityState: CapabilityState,
+        unavailableDetail: String,
+        mutation: () -> BombResult,
+    ): BombResult = if (capabilityState == CapabilityState.SUPPORTED) {
+        mutation()
+    } else {
+        BombResult.unsupported(unavailableDetail)
     }
 }

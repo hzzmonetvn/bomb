@@ -740,14 +740,14 @@ outcomes** reported — including failures.
 
 **Foundation**
 - [x] M0.6 Android UI shell (real MIUIX, predictive back, persisted settings)
-- [~] M0.5 module split + first tests + lint/CI tasks — `:domain` exists and
-      carries 143 passing tests; `:core-api` / `:system-service` not yet created;
-      module rename still open (see the note below)
+- [~] M0.5 module split + first tests + lint/CI tasks — `:domain`, `:core-api`
+      and `:system-service` exist and are tested; module rename remains open
+      (see the note below)
 - [ ] M1 design system completion + ViewModels replacing sample state
-- [ ] M2 AIDL + `BombCoreService` + capability registry + validators
+- [x] M2 AIDL + `BombCoreService` + capability registry + validators
 
-**Core** — [ ] M3 Task Manager · [ ] M4 Stats core · [ ] M5 Stats advanced ·
-[~] M6 Freeze · [ ] M7 Component/Process Control · [ ] M8 App Control
+**Core** — [~] M3 Task Manager · [~] M4 Stats core · [ ] M5 Stats advanced ·
+[~] M6 Freeze · [~] M7 Component/Process Control · [~] M8 App Control
 
 **Extended** — [~] M9 Performance + `bombd` · [ ] M10 Rules · [ ] M11 Network/AdBlock ·
 [ ] M11a Proxy/VPN Gateway · [~] M11b Log Governor + Crash Tracker · [ ] M12 Battery · [ ] M13 Bridge
@@ -769,6 +769,19 @@ nothing executes it on a device.
 
 **170 tests, 0 failures** across `:domain`, `:core-api`, `:system-service`.
 `./gradlew :app-preview:assembleDebug` → BUILD SUCCESSFUL (baseline, 6 min).
+
+### Progress log — 2026-08-10
+
+- Binder contract v5 adds bounded Package Inspector snapshots, verified
+  force-stop and manifest-validated component override state.
+- The Task Manager/process telemetry backend and API exist; app integration is
+  still in progress, so M3/M4 remain partial rather than complete.
+- M7 remains partial: PackageManager component state is implemented, while IFW
+  composition and the ROM-only framework spawn policy are not.
+- M8 remains partial: the package backend is implemented, while the unified
+  per-app UI is not yet complete.
+- `:domain:test`, `:core-api:testDebugUnitTest` and
+  `:system-service:testDebugUnitTest` pass for this backend milestone.
 
 **M0.5's module merge cannot be done as written.** §3's mapping table says `:app`
 is "renamed from today's `:preview` + `:app-preview`", i.e. one module. The two
@@ -824,10 +837,10 @@ Two design points were corrected while implementing, and both are worth keeping:
 - **A shared UID must be allowlisted in full.** An "any package matches" rule
   would let an unlisted package act through the UID it shares with a permitted
   one, and every later check would see a legitimate caller.
-- **Every write path currently returns `UNSUPPORTED`.** This build is an ordinary
-  app with no privileged backend; the reads are real. The asymmetry is encoded in
-  the service rather than described in a roadmap, so the UI reports today's truth
-  instead of a promise.
+- **Writes are capability-gated, typed and verified.** An ordinary install still
+  reports unsupported, while the integrated ROM may use the exact permission-
+  backed paths it actually exposes. Force-stop and component changes re-read
+  platform state; raw commands, paths and arbitrary components are never accepted.
 
 **Framework** — [ ] M14 App Visibility · [ ] M15 Settings Virtualization
 

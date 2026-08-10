@@ -171,16 +171,16 @@ fun rememberSystemView(intervalMillis: Long = 2000L): SystemView {
     return remember(live, history) { SystemView(live, history) }
 }
 
-/** Trend for a metric: live history once there is enough of it, else the sample. */
+// Trend for a metric. On a live device this is the *real* rolling history and
+// nothing else: it may be empty or short at first (the sparkline simply draws
+// nothing until it has two points), but it is never backfilled from a sample —
+// that would have shown fabricated telemetry for the first seconds after launch.
+// The PreviewData branch exists only for the non-live @Preview surface.
 fun SystemView.cpuTrend(): List<Float> =
-    if (isLive && history.cpu.size >= 2) history.cpu.toList() else PreviewData.cpuHistory
+    if (isLive) history.cpu.toList() else PreviewData.cpuHistory
 
 fun SystemView.ramTrend(): List<Float> =
-    if (isLive && history.ram.size >= 2) history.ram.toList() else PreviewData.gpuHistory
+    if (isLive) history.ram.toList() else PreviewData.gpuHistory
 
 fun SystemView.temperatureTrend(): List<Float> =
-    if (isLive && history.temperature.size >= 2) {
-        history.temperature.toList()
-    } else {
-        PreviewData.thermalHistory
-    }
+    if (isLive) history.temperature.toList() else PreviewData.thermalHistory
