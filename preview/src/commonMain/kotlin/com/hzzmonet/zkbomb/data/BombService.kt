@@ -598,6 +598,49 @@ data class BombRecordingBackendStatus(
     }
 }
 
+// ---- CPU / GPU clock scaling (contract v12) mirror types ------------------
+
+/** Which kind of clock a domain drives, by name (v12). */
+object BombClockKind {
+    const val CPU = "CPU"
+    const val GPU = "GPU"
+}
+
+/**
+ * One controllable clock domain, mirroring the backend's per-domain probe.
+ *
+ * A domain is a cpufreq policy (a CPU cluster — little/big/prime) or the GPU
+ * devfreq node. [availableStepsKHz] is the exact step ladder the system exposes,
+ * probed live and always in **kHz** (sysfs's native unit); the UI divides by 1000
+ * to show MHz. Steps are ascending. [minSelectedKHz]/[maxSelectedKHz] are the
+ * current scaling window read back, each null when the node is unreadable — shown
+ * as "—", never a fabricated value. [controllable] is the backend's verdict on
+ * whether writes are supported and permitted; the UI offers Apply only when true.
+ */
+data class BombClockDomain(
+    val id: String,
+    val label: String,
+    val kind: String,
+    val availableStepsKHz: List<Int>,
+    val minSelectedKHz: Int?,
+    val maxSelectedKHz: Int?,
+    val controllable: Boolean,
+) {
+    /** The lowest and highest steps the ladder allows, or null when it is empty. */
+    val floorKHz: Int? get() = availableStepsKHz.minOrNull()
+    val ceilingKHz: Int? get() = availableStepsKHz.maxOrNull()
+}
+
+/**
+ * The CPU/GPU clock snapshot, mirroring the v12 backend. Readable: the domains,
+ * their step ladders and current windows are all probed from the system, so the
+ * picker offers only frequencies the device actually supports and reads back what
+ * the write took.
+ */
+data class BombClockSnapshot(
+    val domains: List<BombClockDomain>,
+)
+
 /** UI-safe command surface; implementations dispatch Binder work off-main. */
 interface BombServiceController {
     fun getFreezeStatus(
@@ -840,6 +883,25 @@ interface BombServiceController {
 
     /** Stop the active session whose bounded id exactly matches [sessionId] (v11+). */
     fun stopCallRecording(sessionId: String, onResult: (BombOperationResult) -> Unit)
+
+    // ---- CPU / GPU clock scaling (contract v12, PERFORMANCE_CONTROL) ----
+
+    /**
+     * The CPU/GPU clock domains with their probed step ladders and current
+     * windows, or null when the contract is older than v12 or the call fails.
+     * Readable; every frequency is in kHz (v12+).
+     */
+    fun getClockSnapshot(onResult: (BombClockSnapshot?) -> Unit)
+
+    /**
+     * Clamp domain [domainId]'s scaling window to [[minKHz], [maxKHz]]. Both must
+     * be steps the domain's ladder actually contains and min ≤ max; the backend
+     * revalidates against the live ladder and returns a result shown verbatim (v12+).
+     */
+    fun setClockRange(domainId: String, minKHz: Int, maxKHz: Int, onResult: (BombOperationResult) -> Unit)
+
+    /** Restore domain [domainId] to its full probed range (floor…ceiling) (v12+). */
+    fun clearClockRange(domainId: String, onResult: (BombOperationResult) -> Unit)
 }
 
 /**

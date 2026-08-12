@@ -505,6 +505,41 @@ private class AndroidBombServiceController(
             mapped
         }
 
+    override fun getClockSnapshot(onResult: (BombClockSnapshot?) -> Unit) =
+        runAsync("clock-snapshot", onFailure = null, onResult = onResult) {
+            // The v12 CPU/GPU clock backend is not in this client's contract yet, so
+            // there is no transaction to call — return null, which the UI renders as
+            // "waiting for the backend". When Codex lands getClockSnapshot(), replace
+            // this with: service.clockSnapshot?.toCommon() guarded on MIN_CLOCK_VERSION.
+            if (apiVersion < MIN_CLOCK_VERSION) return@runAsync null
+            null
+        }
+
+    override fun setClockRange(
+        domainId: String,
+        minKHz: Int,
+        maxKHz: Int,
+        onResult: (BombOperationResult) -> Unit,
+    ) = runAsync(
+        name = "clock-set",
+        onFailure = BombOperationResult("BACKEND_UNAVAILABLE", "Binder call failed"),
+        onResult = onResult,
+    ) {
+        // TODO(v12): guard on MIN_CLOCK_VERSION and call
+        // service.setClockRange(domainId, minKHz, maxKHz) once the contract lands.
+        BombOperationResult("UNSUPPORTED", "CPU/GPU clock control needs the v$MIN_CLOCK_VERSION service")
+    }
+
+    override fun clearClockRange(domainId: String, onResult: (BombOperationResult) -> Unit) =
+        runAsync(
+            name = "clock-clear",
+            onFailure = BombOperationResult("BACKEND_UNAVAILABLE", "Binder call failed"),
+            onResult = onResult,
+        ) {
+            // TODO(v12): service.clearClockRange(domainId) once the contract lands.
+            BombOperationResult("UNSUPPORTED", "CPU/GPU clock control needs the v$MIN_CLOCK_VERSION service")
+        }
+
     /**
      * Run a write guarded on a minimum contract version: an older service does not
      * have the transaction, so asking would land on nothing — return UNSUPPORTED
@@ -613,6 +648,9 @@ private class AndroidBombServiceController(
 
         // Call / VoIP platform recording (status/start/stop) was appended in v11.
         const val MIN_RECORDING_VERSION = 11
+
+        // CPU/GPU clock scaling (getClockSnapshot/setClockRange/clear) — v12.
+        const val MIN_CLOCK_VERSION = 12
     }
 }
 

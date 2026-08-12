@@ -35,6 +35,7 @@ class CapabilityProbe(
     private val performanceProfiles: PerformanceProfileBackend? = null,
     private val liveUpdateBridge: LiveUpdateBridgeBackend? = null,
     private val recording: PlatformRecordingBackend? = null,
+    private val frequencyScaling: FrequencyScalingBackend? = null,
 ) {
 
     fun probe(): BombCapabilities {
@@ -154,9 +155,25 @@ class CapabilityProbe(
                 else -> CapabilityState.REQUIRES_ROOT
             },
         )
+        val frequencyCapabilities = frequencyScaling?.capabilities()
+        val cpuFrequencyState = frequencyCapabilityState(
+            backendProbed = frequencyCapabilities != null,
+            present = frequencyCapabilities?.cpuPresent == true,
+            writable = frequencyCapabilities?.cpuWritable == true,
+        )
+        val gpuFrequencyState = frequencyCapabilityState(
+            backendProbed = frequencyCapabilities != null,
+            present = frequencyCapabilities?.gpuPresent == true,
+            writable = frequencyCapabilities?.gpuWritable == true,
+        )
+        builder.set(BombCapability.CPU_FREQUENCY_CONTROL, cpuFrequencyState)
+        builder.set(BombCapability.GPU_FREQUENCY_CONTROL, gpuFrequencyState)
         builder.set(
             BombCapability.PERFORMANCE_CONTROL,
-            if (performanceProfiles?.available() == true) {
+            if (performanceProfiles?.available() == true ||
+                cpuFrequencyState == CapabilityState.SUPPORTED ||
+                gpuFrequencyState == CapabilityState.SUPPORTED
+            ) {
                 CapabilityState.SUPPORTED
             } else {
                 CapabilityState.REQUIRES_ROOT
@@ -300,6 +317,17 @@ class CapabilityProbe(
     private companion object {
         const val MOSEY_PACKAGE = "com.google.android.mosey"
     }
+}
+
+internal fun frequencyCapabilityState(
+    backendProbed: Boolean,
+    present: Boolean,
+    writable: Boolean,
+): CapabilityState = when {
+    !backendProbed -> CapabilityState.NOT_PROBED
+    writable -> CapabilityState.SUPPORTED
+    present -> CapabilityState.REQUIRES_ROOT
+    else -> CapabilityState.UNSUPPORTED
 }
 
 /**

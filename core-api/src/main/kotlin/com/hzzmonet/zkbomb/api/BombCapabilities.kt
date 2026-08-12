@@ -47,6 +47,10 @@ enum class BombCapability {
 
     // ---- Device control ----
     PERFORMANCE_CONTROL,
+    /** Dynamic per-policy cpufreq min/max control. */
+    CPU_FREQUENCY_CONTROL,
+    /** Dynamic GPU devfreq min/max control. */
+    GPU_FREQUENCY_CONTROL,
     CHARGE_CONTROL,
     /** Capacity telemetry plus an allowlisted writable charging gate. */
     CHARGE_LIMIT_CONTROL,

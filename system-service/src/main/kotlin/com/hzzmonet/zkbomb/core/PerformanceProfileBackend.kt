@@ -13,7 +13,7 @@ interface MemoryTuningPort {
     fun waitBeforeVerification()
 }
 
-/** Typed memory-only profile backend; CPU/GPU controls remain honestly unsupported. */
+/** Applies the memory part of a profile; dynamic CPU/GPU limits use FrequencyScalingBackend. */
 class PerformanceProfileBackend(private val port: MemoryTuningPort) {
 
     fun available(): Boolean = port.available() && capture() != null

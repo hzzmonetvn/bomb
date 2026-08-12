@@ -10,6 +10,8 @@ import com.hzzmonet.zkbomb.api.BombResult;
 import com.hzzmonet.zkbomb.api.BridgeStatusSnapshot;
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel;
 import com.hzzmonet.zkbomb.api.FreezeStatus;
+import com.hzzmonet.zkbomb.api.FrequencyLimitRequestParcel;
+import com.hzzmonet.zkbomb.api.FrequencyScalingSnapshot;
 import com.hzzmonet.zkbomb.api.LogStatus;
 import com.hzzmonet.zkbomb.api.MemoryConfig;
 import com.hzzmonet.zkbomb.api.MemoryStatus;
@@ -374,4 +376,12 @@ interface IBombService {
 
     /** Stops only the active session whose bounded id exactly matches sessionId. */
     BombResult stopCallRecording(String sessionId);
+
+    // ---- Appended in contract version 12 — CPU / GPU frequency limits ----
+
+    /** Fresh dynamic cpufreq/devfreq points. No frequency table is hardcoded. */
+    FrequencyScalingSnapshot getFrequencyScalingSnapshot();
+
+    /** Applies only min/max points advertised by the matching fresh target snapshot. */
+    BombResult setFrequencyLimits(in FrequencyLimitRequestParcel request);
 }

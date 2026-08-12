@@ -4,8 +4,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -17,18 +20,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hzzmonet.zkbomb.data.BombClockBounds
+import com.hzzmonet.zkbomb.data.BombClockDomain
 import com.hzzmonet.zkbomb.data.BombPerformanceProfileDef
 import com.hzzmonet.zkbomb.data.BombServiceState
 import com.hzzmonet.zkbomb.data.BombThermalGuardianBounds
 import com.hzzmonet.zkbomb.data.BombThermalGuardianConfig
+import com.hzzmonet.zkbomb.data.ClockControlUiState
 import com.hzzmonet.zkbomb.data.PerformanceUiState
 import com.hzzmonet.zkbomb.data.V6ApplyState
+import com.hzzmonet.zkbomb.data.rememberClockControl
 import com.hzzmonet.zkbomb.data.rememberPerformance
 import com.hzzmonet.zkbomb.preview.PreviewUiState
 import com.hzzmonet.zkbomb.ui.common.V6ApplyStatusLine
 import com.hzzmonet.zkbomb.ui.design.BombTheme
 import com.hzzmonet.zkbomb.ui.design.component.BombBadge
 import com.hzzmonet.zkbomb.ui.design.component.BombCard
+import com.hzzmonet.zkbomb.ui.design.component.BombEmptyState
+import com.hzzmonet.zkbomb.ui.design.component.BombPreference
 import com.hzzmonet.zkbomb.ui.design.component.BombRowDivider
 import com.hzzmonet.zkbomb.ui.design.component.BombSectionTitle
 import com.hzzmonet.zkbomb.ui.design.component.BombSegmentedButton
@@ -157,10 +166,176 @@ private fun PerformanceConsole(state: PreviewUiState, service: BombServiceState)
                         }
                     },
                 )
+
+                BombSectionTitle("CPU & GPU clocks")
+                ClockControlSection(state = state, service = service)
             }
         }
     }
 }
+
+// ------------------------------------------------------------------ CPU/GPU clocks (v12)
+
+@Composable
+private fun ClockControlSection(state: PreviewUiState, service: BombServiceState) {
+    val controller = service.controller
+    var refreshKey by remember { mutableIntStateOf(0) }
+    val ui = rememberClockControl(
+        service = service,
+        active = true,
+        intervalMillis = state.samplingIntervalMillis,
+        refreshKey = refreshKey,
+    )
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        when (ui) {
+            ClockControlUiState.Loading ->
+                InfoCard("Reading CPU/GPU clock steps from the privileged service…")
+
+            is ClockControlUiState.Unsupported ->
+                BombUnsupportedState(title = "CPU & GPU clocks", reason = ui.reason)
+
+            is ClockControlUiState.Error ->
+                InfoCard(ui.message, error = true)
+
+            is ClockControlUiState.Ready -> {
+                if (ui.snapshot.domains.isEmpty()) {
+                    BombCard { BombEmptyState("No controllable clock domains were probed") }
+                } else {
+                    ui.snapshot.domains.forEach { domain ->
+                        ClockDomainCard(
+                            domain = domain,
+                            controllerAvailable = controller != null,
+                            onApply = { id, minKHz, maxKHz, onResult ->
+                                if (controller == null) onResult(NOT_CONNECTED)
+                                else controller.setClockRange(id, minKHz, maxKHz) { result ->
+                                    onResult(result)
+                                    if (result.isSuccess) refreshKey++
+                                }
+                            },
+                            onReset = { id, onResult ->
+                                if (controller == null) onResult(NOT_CONNECTED)
+                                else controller.clearClockRange(id) { result ->
+                                    onResult(result)
+                                    if (result.isSuccess) refreshKey++
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClockDomainCard(
+    domain: BombClockDomain,
+    controllerAvailable: Boolean,
+    onApply: (String, Int, Int, (com.hzzmonet.zkbomb.data.BombOperationResult) -> Unit) -> Unit,
+    onReset: (String, (com.hzzmonet.zkbomb.data.BombOperationResult) -> Unit) -> Unit,
+) {
+    // Keyed on the stable domain id, not the polled object, so the picks a user is
+    // making are not snapped back by the next sampling tick.
+    var minKHz by remember(domain.id) {
+        mutableStateOf(domain.minSelectedKHz ?: domain.floorKHz ?: domain.availableStepsKHz.firstOrNull() ?: 0)
+    }
+    var maxKHz by remember(domain.id) {
+        mutableStateOf(domain.maxSelectedKHz ?: domain.ceilingKHz ?: domain.availableStepsKHz.lastOrNull() ?: 0)
+    }
+    var status by remember(domain.id) { mutableStateOf<V6ApplyState>(V6ApplyState.Idle) }
+    val busy = status is V6ApplyState.Applying
+    val editable = controllerAvailable && domain.controllable
+    val violation = BombClockBounds.violation(domain, minKHz, maxKHz)
+
+    BombCard {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = domain.label,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = BombTheme.miuix.onSurface,
+                    )
+                    Text(
+                        text = "Now: ${megahertz(domain.minSelectedKHz)} – ${megahertz(domain.maxSelectedKHz)}",
+                        modifier = Modifier.padding(top = 2.dp),
+                        fontSize = 12.sp,
+                        color = BombTheme.miuix.onSurfaceVariantSummary,
+                    )
+                }
+                BombBadge(text = domain.kind, color = BombTheme.colors.accent)
+            }
+        }
+        BombRowDivider()
+        StepRow("Minimum", domain.availableStepsKHz, minKHz, editable) { minKHz = it }
+        BombRowDivider()
+        StepRow("Maximum", domain.availableStepsKHz, maxKHz, editable) { maxKHz = it }
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (!domain.controllable) {
+                Text(
+                    text = "This domain is read-only on this device.",
+                    fontSize = 12.sp,
+                    color = BombTheme.miuix.onSurfaceVariantSummary,
+                )
+            } else if (violation != null) {
+                Text(text = violation, fontSize = 12.sp, color = BombTheme.colors.warn)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        status = V6ApplyState.Applying
+                        onApply(domain.id, minKHz, maxKHz) { status = V6ApplyState.Done(it) }
+                    },
+                    enabled = editable && violation == null && !busy,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColorsPrimary(),
+                ) { Text(text = "Apply") }
+                Button(
+                    onClick = {
+                        status = V6ApplyState.Applying
+                        onReset(domain.id) { status = V6ApplyState.Done(it) }
+                    },
+                    enabled = editable && !busy,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(),
+                ) { Text(text = "Reset") }
+            }
+            V6ApplyStatusLine(status)
+        }
+    }
+}
+
+@Composable
+private fun StepRow(
+    label: String,
+    steps: List<Int>,
+    selectedKHz: Int,
+    enabled: Boolean,
+    onSelect: (Int) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    BombPreference(
+        title = label,
+        value = megahertz(selectedKHz),
+        enabled = enabled,
+        onClick = { expanded = !expanded },
+    )
+    if (expanded) {
+        Column(modifier = Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
+            steps.forEach { khz ->
+                BombPreference(
+                    title = megahertz(khz),
+                    value = if (khz == selectedKHz) "✓" else null,
+                    onClick = { onSelect(khz); expanded = false },
+                )
+            }
+        }
+    }
+}
+
+private fun megahertz(khz: Int?): String = khz?.let { "${it / 1000} MHz" } ?: "—"
 
 @Composable
 private fun ActiveProfileCard(snapshot: com.hzzmonet.zkbomb.data.BombPerformanceProfilesSnapshot) {

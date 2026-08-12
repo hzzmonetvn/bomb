@@ -24,6 +24,8 @@ import com.hzzmonet.zkbomb.api.BombRuntimeMode
 import com.hzzmonet.zkbomb.api.BridgeStatusSnapshot
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel
 import com.hzzmonet.zkbomb.api.FreezeStatus
+import com.hzzmonet.zkbomb.api.FrequencyLimitRequestParcel
+import com.hzzmonet.zkbomb.api.FrequencyScalingSnapshot
 import com.hzzmonet.zkbomb.api.IBombService
 import com.hzzmonet.zkbomb.api.LogStatus
 import com.hzzmonet.zkbomb.api.MemoryConfig
@@ -92,6 +94,7 @@ class BombCoreService : Service() {
     private val platformRecordingBackend by lazy {
         PlatformRecordingBackend.create(this, ::onRecordingSessionEnded)
     }
+    private val frequencyScalingBackend by lazy { FrequencyScalingBackend() }
     private val capabilityProbe by lazy {
         CapabilityProbe(
             this,
@@ -103,9 +106,10 @@ class BombCoreService : Service() {
             processTelemetry,
             packageControl,
             powerSupplyBackend,
-            performanceProfileBackend,
-            liveUpdateBridge,
-            platformRecordingBackend,
+            performanceProfiles = performanceProfileBackend,
+            liveUpdateBridge = liveUpdateBridge,
+            recording = platformRecordingBackend,
+            frequencyScaling = frequencyScalingBackend,
         )
     }
     private val logPlanner = LogTransitionPlanner()
@@ -172,7 +176,7 @@ class BombCoreService : Service() {
     private val recordingExecutor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "BombCallRecorder").apply { isDaemon = true }
     }
-    private val recordingModeSignals by lazy {
+    private val recordingModeSignals: RecordingModeSignalSource by lazy {
         RecordingModeSignalSource(
             context = this,
             executor = recordingExecutor,
@@ -917,6 +921,21 @@ class BombCoreService : Service() {
             }
             return result
         }
+
+        // ---- CPU / GPU dynamic frequency limits (contract version 12) ----
+
+        override fun getFrequencyScalingSnapshot(): FrequencyScalingSnapshot {
+            if (!validator.isAllowed(Binder.getCallingUid())) {
+                return FrequencyScalingSnapshot(emptyList())
+            }
+            return FrequencyScalingSnapshot.fromDomain(frequencyScalingBackend.snapshot())
+        }
+
+        override fun setFrequencyLimits(request: FrequencyLimitRequestParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val parsed = request?.toDomain() ?: return BombResult.invalidArgument("request")
+            return frequencyScalingBackend.set(parsed)
+        }
     }
 
     private fun startAutomationSignals(): Boolean {
@@ -1042,8 +1061,9 @@ class BombCoreService : Service() {
          * 9 — capability-probed Thermal Guardian and Battery Lab profiles.
          * 10 — Live Update/HyperIsland bridge and performance/thermal profiles.
          * 11 — capability-verified platform Call/VoIP recording backend.
+         * 12 — dynamic CPU policy and GPU devfreq min/max limits.
          */
-        const val API_VERSION = 11
+        const val API_VERSION = 12
         const val MEMORY_VERIFY_ATTEMPTS = 10
         const val MEMORY_VERIFY_DELAY_MS = 50L
         const val CONTROL_VERIFY_ATTEMPTS = 10
