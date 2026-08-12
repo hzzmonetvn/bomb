@@ -22,10 +22,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hzzmonet.zkbomb.data.BombCapabilityKeys
+import com.hzzmonet.zkbomb.data.BombOperationResult
+import com.hzzmonet.zkbomb.data.BombRecordingBackendStatus
+import com.hzzmonet.zkbomb.data.BombRecordingKind
+import com.hzzmonet.zkbomb.data.BombRecordingOutcome
+import com.hzzmonet.zkbomb.data.BombRecordingState
+import com.hzzmonet.zkbomb.data.BombServiceState
+import com.hzzmonet.zkbomb.data.RecordingBackendUiState
+import com.hzzmonet.zkbomb.data.V6ApplyState
 import com.hzzmonet.zkbomb.data.VoipCaptureSupport
 import com.hzzmonet.zkbomb.data.VoipRecorderHandle
 import com.hzzmonet.zkbomb.data.VoipRecording
+import com.hzzmonet.zkbomb.data.rememberRecordingBackend
 import com.hzzmonet.zkbomb.preview.PreviewUiState
+import com.hzzmonet.zkbomb.ui.common.V6ApplyStatusLine
 import com.hzzmonet.zkbomb.ui.design.BombIcon
 import com.hzzmonet.zkbomb.ui.design.BombIcons
 import com.hzzmonet.zkbomb.ui.design.BombTheme
@@ -84,6 +95,7 @@ fun LazyListScope.recorderContent(
     state: PreviewUiState,
     navigator: BombNavigator,
     recorder: VoipRecorderHandle,
+    service: BombServiceState,
 ) {
     val rec = recorder.state
     val controller = recorder.controller
@@ -104,16 +116,10 @@ fun LazyListScope.recorderContent(
         }
     }
 
-    // Phone calls are a separate, telephony-side path and are not wired yet;
-    // saying so plainly beats a tri-state control that silently does nothing.
-    item { BombSectionTitle("Phone calls") }
-    item {
-        BombUnsupportedState(
-            title = "Phone call recording isn't in this build",
-            reason = "This is the cellular-call path, separate from VoIP. It is not " +
-                "implemented yet. VoIP app calls below are recorded.",
-        )
-    }
+    // The privileged platform backend (v11) records cellular and VoIP calls into
+    // a caller-owned file. Hosted in one item so its poller and refresh state are a
+    // single unit; it samples only while this screen is composed.
+    item { PlatformRecordingSection(service, state.samplingIntervalMillis) }
 
     item { BombSectionTitle("VoIP calls") }
 
@@ -241,6 +247,250 @@ fun LazyListScope.recorderContent(
         }
     }
 }
+
+// ------------------------------------------------------------ Platform recording (v11)
+
+@Composable
+private fun PlatformRecordingSection(service: BombServiceState, intervalMillis: Long) {
+    val controller = service.controller
+    var refreshKey by remember { mutableStateOf(0) }
+    val ui = rememberRecordingBackend(
+        service = service,
+        active = true,
+        intervalMillis = intervalMillis,
+        refreshKey = refreshKey,
+    )
+    var actionStatus by remember { mutableStateOf<V6ApplyState>(V6ApplyState.Idle) }
+
+    val cellularCap = service.isSupported(BombCapabilityKeys.PHONE_RECORDING)
+    val voipCap = service.isSupported(BombCapabilityKeys.VOIP_RECORDING)
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        BombSectionTitle("Phone & VoIP calls · privileged backend")
+        when (ui) {
+            RecordingBackendUiState.Loading ->
+                InfoLine("Reading recording backend status…")
+
+            is RecordingBackendUiState.Unsupported ->
+                BombUnsupportedState(title = "Platform recording", reason = ui.reason)
+
+            is RecordingBackendUiState.Error ->
+                InfoLine(ui.message, error = true)
+
+            is RecordingBackendUiState.Ready -> {
+                val status = ui.status
+                PlatformStatusCard(status)
+                PlatformControls(
+                    status = status,
+                    cellularCap = cellularCap,
+                    voipCap = voipCap,
+                    controllerAvailable = controller != null,
+                    busy = actionStatus is V6ApplyState.Applying,
+                    onStart = { kind ->
+                        actionStatus = V6ApplyState.Applying
+                        if (controller == null) {
+                            actionStatus = V6ApplyState.Done(NOT_CONNECTED_REC)
+                        } else {
+                            controller.startCallRecording(kind) { result ->
+                                actionStatus = V6ApplyState.Done(result)
+                                if (result.isSuccess) refreshKey++
+                            }
+                        }
+                    },
+                    onStop = { sessionId ->
+                        actionStatus = V6ApplyState.Applying
+                        if (controller == null) {
+                            actionStatus = V6ApplyState.Done(NOT_CONNECTED_REC)
+                        } else {
+                            controller.stopCallRecording(sessionId) { result ->
+                                actionStatus = V6ApplyState.Done(result)
+                                if (result.isSuccess) refreshKey++
+                            }
+                        }
+                    },
+                )
+                V6ApplyStatusLine(actionStatus, modifier = Modifier.padding(start = 4.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlatformStatusCard(status: BombRecordingBackendStatus) {
+    BombCard {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Backend state",
+                        fontSize = 13.sp,
+                        color = BombTheme.miuix.onSurfaceVariantSummary,
+                    )
+                    Text(
+                        text = recordingStateLabel(status.state),
+                        modifier = Modifier.padding(top = 2.dp),
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = BombTheme.miuix.onSurface,
+                    )
+                }
+                BombBadge(text = recordingStateBadge(status.state), color = recordingStateColor(status.state))
+            }
+            if (status.isRecording && status.activeKind != null) {
+                Text(
+                    text = "Recording ${kindLabel(status.activeKind)} · audio mode " +
+                        audioModeLabel(status.activeKind) +
+                        (status.lastPeakAmplitude?.let { " · peak $it" } ?: ""),
+                    modifier = Modifier.padding(top = 10.dp),
+                    fontSize = 12.sp,
+                    color = BombTheme.miuix.onSurfaceVariantSummary,
+                )
+            }
+        }
+        BombRowDivider()
+        SupportRow("Capture permission", if (status.capturePermissionHeld) "Held" else "Not held", status.capturePermissionHeld)
+        BombRowDivider()
+        SupportRow("Cellular capture", supportLabel(status.cellularSupport), status.cellularSupport == VoipCaptureSupport.SUPPORTED)
+        BombRowDivider()
+        SupportRow("VoIP capture", supportLabel(status.voipSupport), status.voipSupport == VoipCaptureSupport.SUPPORTED)
+        status.lastOutcome?.let { outcome ->
+            BombRowDivider()
+            SupportRow(
+                label = "Last capture",
+                value = outcomeLabel(outcome) + (status.lastPeakAmplitude?.let { " · peak $it" } ?: ""),
+                ok = outcome == BombRecordingOutcome.COMPLETED,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SupportRow(label: String, value: String, ok: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text = label, modifier = Modifier.weight(1f), fontSize = 14.sp, color = BombTheme.miuix.onSurface)
+        BombBadge(
+            text = value,
+            color = if (ok) BombTheme.colors.ok else BombTheme.miuix.onSurfaceVariantSummary,
+        )
+    }
+}
+
+@Composable
+private fun PlatformControls(
+    status: BombRecordingBackendStatus,
+    cellularCap: Boolean,
+    voipCap: Boolean,
+    controllerAvailable: Boolean,
+    busy: Boolean,
+    onStart: (String) -> Unit,
+    onStop: (String) -> Unit,
+) {
+    val idle = status.state == BombRecordingState.IDLE
+    val ready = controllerAvailable && idle && !busy && status.capturePermissionHeld
+    val canCellular = ready && cellularCap && status.cellularSupport == VoipCaptureSupport.SUPPORTED
+    val canVoip = ready && voipCap && status.voipSupport == VoipCaptureSupport.SUPPORTED
+    val canStop = controllerAvailable && !busy && status.isRecording && status.activeSessionId != null
+
+    BombCard {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = { onStart(BombRecordingKind.CELLULAR) },
+                    enabled = canCellular,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColorsPrimary(),
+                ) { Text(text = "Record cellular") }
+                Button(
+                    onClick = { onStart(BombRecordingKind.VOIP) },
+                    enabled = canVoip,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColorsPrimary(),
+                ) { Text(text = "Record VoIP") }
+            }
+            Button(
+                onClick = { status.activeSessionId?.let(onStop) },
+                enabled = canStop,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(),
+            ) { Text(text = "Stop recording") }
+
+            val hint = when {
+                !cellularCap && !voipCap -> "No recording capability is granted on this install."
+                !status.capturePermissionHeld -> "The backend is not holding a capture permission."
+                else -> null
+            }
+            if (hint != null) {
+                Text(text = hint, fontSize = 12.sp, color = BombTheme.miuix.onSurfaceVariantSummary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun InfoLine(text: String, error: Boolean = false) {
+    BombCard {
+        Text(
+            text = text,
+            modifier = Modifier.padding(16.dp),
+            fontSize = 13.sp,
+            color = if (error) BombTheme.colors.critical else BombTheme.miuix.onSurfaceVariantSummary,
+        )
+    }
+}
+
+private fun recordingStateLabel(state: String): String = when (state) {
+    BombRecordingState.IDLE -> "Idle"
+    BombRecordingState.RECORDING -> "Recording"
+    BombRecordingState.STOPPING -> "Stopping"
+    else -> state
+}
+
+private fun recordingStateBadge(state: String): String = when (state) {
+    BombRecordingState.RECORDING -> "LIVE"
+    BombRecordingState.STOPPING -> "STOPPING"
+    else -> "IDLE"
+}
+
+@Composable
+private fun recordingStateColor(state: String) = when (state) {
+    BombRecordingState.RECORDING -> BombTheme.colors.critical
+    BombRecordingState.STOPPING -> BombTheme.colors.warn
+    else -> BombTheme.colors.ok
+}
+
+private fun kindLabel(kind: String): String = when (kind) {
+    BombRecordingKind.CELLULAR -> "cellular call"
+    BombRecordingKind.VOIP -> "VoIP call"
+    else -> kind.lowercase()
+}
+
+// The audio mode a kind requires — the platform mode under which its call audio
+// is routable. This is the "audio mode" the recorder shows, mapped 1:1 from kind.
+private fun audioModeLabel(kind: String): String = when (kind) {
+    BombRecordingKind.CELLULAR -> "in-call"
+    BombRecordingKind.VOIP -> "in-communication"
+    else -> "unknown"
+}
+
+private fun supportLabel(support: VoipCaptureSupport): String = when (support) {
+    VoipCaptureSupport.SUPPORTED -> "Supported"
+    VoipCaptureSupport.SILENT -> "Silent — no call audio"
+    VoipCaptureSupport.DENIED -> "Permission denied"
+    VoipCaptureSupport.UNAVAILABLE -> "Unavailable"
+    VoipCaptureSupport.UNPROBED -> "Not probed"
+}
+
+private fun outcomeLabel(outcome: String): String = when (outcome) {
+    BombRecordingOutcome.COMPLETED -> "Completed"
+    BombRecordingOutcome.SILENT -> "Silent (nothing usable captured)"
+    BombRecordingOutcome.FAILED -> "Failed"
+    else -> outcome
+}
+
+private val NOT_CONNECTED_REC = BombOperationResult("BACKEND_UNAVAILABLE", "Service is not connected")
 
 private fun supportTitle(support: VoipCaptureSupport): String = when (support) {
     VoipCaptureSupport.DENIED -> "Missing a permission for call capture"

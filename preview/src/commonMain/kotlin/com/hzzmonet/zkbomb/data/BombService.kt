@@ -432,6 +432,172 @@ data class BombBatteryLabSnapshot(
         }
 }
 
+// ---- Bomb Bridge & Performance Profiles (contract v10) mirror types --------
+
+/**
+ * Live event types the bridge accepts, by name (v10). Mirrors the domain
+ * `LiveEventType`; an unknown name is simply one this build will not offer.
+ */
+object BombLiveEventType {
+    val ALL = listOf(
+        "MEDIA", "DOWNLOAD", "UPLOAD", "NAVIGATION", "TIMER", "CALL",
+        "CALL_RECORDING", "CHARGING", "HOTSPOT", "VPN", "FILE_TRANSFER",
+        "GAME_STATS", "APP_INSTALL", "CUSTOM",
+    )
+}
+
+/** Live event lifecycle states, by name (v10). */
+object BombLiveEventState {
+    const val ACTIVE = "ACTIVE"
+    const val PAUSED = "PAUSED"
+    const val COMPLETED = "COMPLETED"
+    const val FAILED = "FAILED"
+    const val DISMISSED = "DISMISSED"
+    val ALL = listOf(ACTIVE, PAUSED, COMPLETED, FAILED, DISMISSED)
+}
+
+/** The renderer a bridge event was actually routed to, by name (v10). */
+object BombBridgeRenderer {
+    const val LIVE_UPDATE = "LIVE_UPDATE"
+    const val HYPER_ISLAND = "HYPER_ISLAND"
+    const val NOTIFICATION = "NOTIFICATION"
+}
+
+/**
+ * One live event pushed to the bridge, mirroring `core-api BombLiveEventParcel`.
+ * The service revalidates it and routes it to whichever renderer the device
+ * supports; the notification renderer is the guaranteed fallback.
+ */
+data class BombLiveEvent(
+    val id: String,
+    val sourcePackage: String,
+    val type: String,
+    val title: String,
+    val subtitle: String?,
+    val compactText: String?,
+    val progressFraction: Double?,
+    val progressIndeterminate: Boolean,
+    val state: String,
+    val timestampMillis: Long,
+)
+
+/** One active event's renderer/state, mirroring `core-api BridgeEventStatusParcel`. */
+data class BombBridgeEventStatus(
+    val eventId: String,
+    val renderer: String,
+    val state: String,
+    val updatedAtMillis: Long,
+)
+
+/**
+ * The bridge runtime snapshot, mirroring `core-api BridgeStatusSnapshot`.
+ * Readable, so the UI shows the real renderer availability probed on the device
+ * and the events currently live — the notification fallback is always present.
+ */
+data class BombBridgeStatus(
+    val notificationAvailable: Boolean,
+    val liveUpdateAvailable: Boolean,
+    val hyperIslandFeaturePresent: Boolean,
+    val hyperIslandProtocolVersion: Int,
+    val hyperIslandPermitted: Boolean,
+    val hyperIslandPayloadAdapterAvailable: Boolean,
+    val activeEvents: List<BombBridgeEventStatus>,
+)
+
+/**
+ * One typed performance-profile intent, mirroring `core-api PerformanceProfileParcel`.
+ * A backend applies only the fields its capabilities prove; [BombPerformanceProfilesSnapshot.appliedFields]
+ * reports which ones actually took.
+ */
+data class BombPerformanceProfileDef(
+    val name: String,
+    val swappiness: Int,
+    val pageCluster: Int,
+    val refreshRateHz: Int?,
+    val cpuStrategy: String,
+    val gpuStrategy: String,
+    val thermalStrategy: String,
+    val monitorPreset: String,
+)
+
+/** Thermal Guardian thresholds, mirroring `core-api ThermalGuardianConfigParcel`. */
+data class BombThermalGuardianConfig(
+    val sustainableAtDeciCelsius: Int,
+    val ecoAtDeciCelsius: Int,
+    val restoreAtDeciCelsius: Int,
+    val cooldownMillis: Long,
+)
+
+/**
+ * The performance snapshot, mirroring `core-api PerformanceProfilesSnapshot`.
+ * Readable: [activeProfile] and [appliedFields] read back what the backend
+ * actually did, so the UI never claims a field applied that the device could
+ * not honour. [thermalGuardianActiveProfile] is the profile the guardian has
+ * forced, distinct from a profile the user selected.
+ */
+data class BombPerformanceProfilesSnapshot(
+    val profiles: List<BombPerformanceProfileDef>,
+    val activeProfile: String?,
+    val memoryControlAvailable: Boolean,
+    val appliedFields: List<String>,
+    val thermalGuardianConfig: BombThermalGuardianConfig?,
+    val thermalGuardianActiveProfile: String?,
+)
+
+// ---- Call / VoIP platform recording (contract v11) mirror types -----------
+
+/** Platform recording lifecycle state, by name (v11). Mirrors `PlatformRecordingState`. */
+object BombRecordingState {
+    const val IDLE = "IDLE"
+    const val RECORDING = "RECORDING"
+    const val STOPPING = "STOPPING"
+}
+
+/** The two call kinds the platform backend records, by name (v11). */
+object BombRecordingKind {
+    const val CELLULAR = "CELLULAR"
+    const val VOIP = "VOIP"
+}
+
+/** The outcome of the last finished platform capture, by name (v11). */
+object BombRecordingOutcome {
+    const val COMPLETED = "COMPLETED"
+    const val SILENT = "SILENT"
+    const val FAILED = "FAILED"
+}
+
+/**
+ * The privileged recording backend's status, mirroring `core-api RecordingBackendStatus`.
+ *
+ * Operational metadata only: by contract this never carries a phone number, a
+ * contact, an app title or an output path. [cellularSupport]/[voipSupport] are the
+ * probed [VoipCaptureSupport] states — only SUPPORTED permits recording, so a
+ * SILENT path is a refusal reason, not a green light. [lastOutcome] and
+ * [lastPeakAmplitude] describe the previous capture so a silent result is surfaced
+ * rather than passed off as a saved call.
+ */
+data class BombRecordingBackendStatus(
+    val state: String,
+    val activeSessionId: String?,
+    val activeKind: String?,
+    val startedAtElapsedRealtimeMillis: Long?,
+    val cellularSupport: VoipCaptureSupport,
+    val voipSupport: VoipCaptureSupport,
+    val capturePermissionHeld: Boolean,
+    val activeClientSilenced: Boolean?,
+    val lastOutcome: String?,
+    val lastPeakAmplitude: Int?,
+) {
+    val isRecording: Boolean get() = state == BombRecordingState.RECORDING || state == BombRecordingState.STOPPING
+
+    /** The probed support for [kind], or UNPROBED for an unknown name. */
+    fun supportFor(kind: String): VoipCaptureSupport = when (kind) {
+        BombRecordingKind.CELLULAR -> cellularSupport
+        BombRecordingKind.VOIP -> voipSupport
+        else -> VoipCaptureSupport.UNPROBED
+    }
+}
+
 /** UI-safe command surface; implementations dispatch Binder work off-main. */
 interface BombServiceController {
     fun getFreezeStatus(
@@ -614,6 +780,66 @@ interface BombServiceController {
 
     /** Disable the policy and restore the control value Bomb captured (v9+). */
     fun clearBatteryLabProfile(onResult: (BombOperationResult) -> Unit)
+
+    // ---- Bomb Bridge (contract v10, LIVE_UPDATE_BRIDGE / HYPER_ISLAND_BRIDGE) ----
+
+    /**
+     * The bridge runtime snapshot — renderer availability plus the live events —
+     * or null when the contract is older than v10 or the call fails. Readable, so
+     * the UI reflects what the device actually supports (v10+).
+     */
+    fun getBridgeStatus(onResult: (BombBridgeStatus?) -> Unit)
+
+    /**
+     * Publish or update one live event. The service revalidates it and routes it
+     * to a supported renderer, falling back to a notification. The id is the
+     * stable update key (v10+).
+     */
+    fun publishLiveEvent(event: BombLiveEvent, onResult: (BombOperationResult) -> Unit)
+
+    /** Dismiss one live event across every renderer that showed it (v10+). */
+    fun dismissLiveEvent(eventId: String, onResult: (BombOperationResult) -> Unit)
+
+    // ---- Performance Profiles (contract v10, PERFORMANCE_CONTROL) ----
+
+    /**
+     * The profile catalog, the active profile and the fields that actually
+     * applied, or null when the contract is older than v10 or the call fails.
+     * Readable — the UI shows real applied state, not the requested intent (v10+).
+     */
+    fun getPerformanceProfiles(onResult: (BombPerformanceProfilesSnapshot?) -> Unit)
+
+    /** Activate one profile by name; backends apply only capability-proven fields (v10+). */
+    fun setPerformanceProfile(profileName: String, onResult: (BombOperationResult) -> Unit)
+
+    /** Restore the pre-profile control values Bomb captured (v10+). */
+    fun clearPerformanceProfile(onResult: (BombOperationResult) -> Unit)
+
+    /** Persist and enable the Thermal Guardian hysteresis config (v10+). */
+    fun setThermalGuardianConfig(config: BombThermalGuardianConfig, onResult: (BombOperationResult) -> Unit)
+
+    /** Disable the Thermal Guardian and release any profile it forced (v10+). */
+    fun clearThermalGuardianConfig(onResult: (BombOperationResult) -> Unit)
+
+    // ---- Call / VoIP recording (contract v11, PHONE_RECORDING / VOIP_RECORDING) ----
+
+    /**
+     * The privileged recording backend's status — capability and active-session
+     * metadata only — or null when the contract is older than v11 or the call
+     * fails. Readable; carries no call content or output path (v11+).
+     */
+    fun getRecordingBackendStatus(onResult: (BombRecordingBackendStatus?) -> Unit)
+
+    /**
+     * Start one platform recording of [kind] (a [BombRecordingKind] name) into a
+     * caller-owned file the implementation allocates. The session id is assigned
+     * by the implementation and surfaces in the status snapshot; Stop keys on it.
+     * The backend accepts AAC/m4a only. Returns UNSUPPORTED below v11 (v11+).
+     */
+    fun startCallRecording(kind: String, onResult: (BombOperationResult) -> Unit)
+
+    /** Stop the active session whose bounded id exactly matches [sessionId] (v11+). */
+    fun stopCallRecording(sessionId: String, onResult: (BombOperationResult) -> Unit)
 }
 
 /**

@@ -10,7 +10,16 @@ import androidx.compose.runtime.Composable
  * the Android layer maps into it. Only [SUPPORTED] enables recording controls;
  * every other value disables them and shows [VoipRecorderState.supportDetail].
  */
-enum class VoipCaptureSupport { SUPPORTED, SILENT, DENIED, UNAVAILABLE, UNPROBED }
+enum class VoipCaptureSupport {
+    SUPPORTED, SILENT, DENIED, UNAVAILABLE, UNPROBED,
+    ;
+
+    companion object {
+        /** Maps the domain `CaptureSupport` name; an unknown name degrades to [UNPROBED]. */
+        fun fromName(name: String): VoipCaptureSupport =
+            entries.firstOrNull { it.name == name } ?: UNPROBED
+    }
+}
 
 /** One finished recording, as listed on the recorder screen. */
 data class VoipRecording(

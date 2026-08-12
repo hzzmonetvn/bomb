@@ -8,17 +8,29 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.hzzmonet.zkbomb.data.BombCapabilityKeys
+import com.hzzmonet.zkbomb.data.BombBatteryBounds
+import com.hzzmonet.zkbomb.data.BombBatteryLabProfile
+import com.hzzmonet.zkbomb.data.BombBatteryLabSnapshot
+import com.hzzmonet.zkbomb.data.BombBatteryLabBackendStatus
+import com.hzzmonet.zkbomb.data.BombOperationResult
 import com.hzzmonet.zkbomb.data.BombServiceState
+import com.hzzmonet.zkbomb.data.BatteryLabState
 import com.hzzmonet.zkbomb.data.SystemView
+import com.hzzmonet.zkbomb.data.V6ApplyState
+import com.hzzmonet.zkbomb.data.rememberBatteryLab
 import com.hzzmonet.zkbomb.data.temperatureTrend
-import com.hzzmonet.zkbomb.preview.PreviewData
 import com.hzzmonet.zkbomb.preview.PreviewUiState
+import com.hzzmonet.zkbomb.ui.common.V6ApplyStatusLine
 import com.hzzmonet.zkbomb.ui.design.BombIcons
 import com.hzzmonet.zkbomb.ui.design.BombTheme
 import com.hzzmonet.zkbomb.ui.design.component.BombCard
@@ -30,81 +42,306 @@ import com.hzzmonet.zkbomb.ui.design.component.BombSparkline
 import com.hzzmonet.zkbomb.ui.design.component.BombStatCard
 import com.hzzmonet.zkbomb.ui.design.component.BombSwitchPreference
 import com.hzzmonet.zkbomb.ui.design.component.BombUnsupportedState
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
 
+/**
+ * Battery Lab (BOMB_PLAN.md §14) — battery health, charging and a bounded
+ * charge/thermal profile.
+ *
+ * The framework header is the unprivileged battery view; the "Battery Lab" section
+ * below is the privileged v9 `/sys/class/power_supply` snapshot with the active
+ * profile read back from the service. The profile console only enables the
+ * controls the backend probed as writable and shows the service's own result.
+ */
 fun LazyListScope.batteryLabContent(
     state: PreviewUiState,
     system: SystemView,
     service: BombServiceState,
 ) {
-    val canControlCharge = service.isSupported(BombCapabilityKeys.CHARGE_CONTROL)
     item { BatteryHeader(system) }
+    item { BombSectionTitle("Battery Lab") }
+    item { BatteryLabSection(service, state.samplingIntervalMillis) }
+}
 
-    item { BombSectionTitle("Health") }
-    item {
-        BombCard {
-            BombPreference(
-                title = "Cycle count",
-                summary = if (system.isLive && system.batteryCycleCount == null) {
-                    "Not reported by this ROM"
-                } else {
-                    null
-                },
-                value = system.batteryCycleCount?.toString() ?: "—",
-                enabled = false,
-                onClick = { },
-            )
-            BombRowDivider()
-            BombPreference(
-                title = "Charge counter",
-                value = system.chargeCounterMah?.let { "$it mAh" } ?: "—",
-                enabled = false,
-                onClick = { },
-            )
-            BombRowDivider()
-            BombPreference(title = "Health", value = system.batteryHealth ?: "—", enabled = false, onClick = { })
-            BombRowDivider()
-            BombPreference(title = "Technology", value = system.batteryTechnology ?: "—", enabled = false, onClick = { })
-            BombRowDivider()
-            BombPreference(title = "Thermal status", value = system.thermalStatus ?: "—", enabled = false, onClick = { })
-        }
-    }
+@Composable
+private fun BatteryLabSection(service: BombServiceState, intervalMillis: Long) {
+    var refreshKey by remember { mutableIntStateOf(0) }
+    val labState = rememberBatteryLab(
+        service = service,
+        active = true, // composed only on the Battery Lab route, so this is route-gated
+        intervalMillis = intervalMillis,
+        refreshKey = refreshKey,
+    )
 
-    item { BombSectionTitle("Charging") }
-    item {
-        BombCard {
-            BombSwitchPreference(
-                title = "Charge limit",
-                summary = if (canControlCharge) {
-                    "Stop charging at a level to reduce wear"
-                } else {
-                    "No typed, verified charge-control backend on this device"
-                },
-                checked = if (canControlCharge) state.chargeLimit else false,
-                onCheckedChange = { if (canControlCharge) state.chargeLimit = it },
-                enabled = canControlCharge,
-            )
-            if (state.chargeLimit) {
-                BombRowDivider()
-                BombSliderPreference(
-                    title = "Limit",
-                    value = state.chargeLimitLevel,
-                    onValueChange = { state.chargeLimitLevel = it },
-                    valueLabel = "${state.chargeLimitLevel.toInt()}%",
-                    valueRange = 60f..95f,
-                    steps = 6,
-                    enabled = canControlCharge,
-                )
+    when (labState) {
+        BatteryLabState.Loading ->
+            InfoCard("Reading the power-supply snapshot from the privileged service…")
+
+        is BatteryLabState.Unsupported ->
+            BombUnsupportedState(title = "Battery Lab", reason = labState.reason)
+
+        is BatteryLabState.Error ->
+            InfoCard(labState.message, error = true)
+
+        is BatteryLabState.Ready -> {
+            val snapshot = labState.snapshot
+            when (snapshot.backendStatus) {
+                BombBatteryLabBackendStatus.AVAILABLE ->
+                    BatteryLabReady(service, snapshot) { refreshKey++ }
+                BombBatteryLabBackendStatus.UNSUPPORTED ->
+                    BombUnsupportedState(
+                        title = "Battery Lab unavailable",
+                        reason = "This device does not expose a charge- or thermal-control node " +
+                            "Bomb can drive. Health metrics above still come from the framework.",
+                    )
+                BombBatteryLabBackendStatus.UNAVAILABLE ->
+                    InfoCard("The power-supply backend did not answer on this build.", error = true)
             }
         }
     }
+}
 
-    item {
+@Composable
+private fun BatteryLabReady(
+    service: BombServiceState,
+    snapshot: BombBatteryLabSnapshot,
+    onApplied: () -> Unit,
+) {
+    HealthCard(snapshot)
+    ChargeControlCard(service, snapshot, onApplied)
+}
+
+@Composable
+private fun HealthCard(snapshot: BombBatteryLabSnapshot) {
+    BombCard {
+        BombPreference(
+            title = "Power supply",
+            value = snapshot.powerSupplyName ?: "—",
+            enabled = false,
+            onClick = { },
+        )
+        BombRowDivider()
+        BombPreference(title = "Status", value = snapshot.status ?: "—", enabled = false, onClick = { })
+        BombRowDivider()
+        BombPreference(
+            title = "Cycle count",
+            value = snapshot.cycleCount?.toString() ?: "—",
+            enabled = false,
+            onClick = { },
+        )
+        BombRowDivider()
+        BombPreference(
+            title = "Battery health",
+            summary = "Full charge relative to design capacity",
+            value = snapshot.healthPercent?.let { "$it%" } ?: "—",
+            enabled = false,
+            onClick = { },
+        )
+        BombRowDivider()
+        BombPreference(
+            title = "Temperature",
+            value = deciToC(snapshot.temperatureDeciCelsius),
+            enabled = false,
+            onClick = { },
+        )
+        BombRowDivider()
+        BombPreference(
+            title = "Charge control",
+            summary = "Strategy Bomb probed on this device",
+            value = snapshot.chargeControlKind ?: "none",
+            enabled = false,
+            onClick = { },
+        )
+    }
+}
+
+@Composable
+private fun ChargeControlCard(
+    service: BombServiceState,
+    snapshot: BombBatteryLabSnapshot,
+    onApplied: () -> Unit,
+) {
+    val controller = service.controller
+    val canCharge = snapshot.chargeLimitControlSupported
+    val canThermal = snapshot.thermalChargeControlSupported
+
+    if (!canCharge && !canThermal) {
         BombUnsupportedState(
-            title = "Charging current strategy",
-            reason = "This device exposes a charge-limit node but no writable current " +
-                "control. Bomb enables the controls it probed successfully and marks " +
-                "the rest unavailable — it does not guess vendor paths.",
+            title = "Charge policy",
+            reason = "No writable charge-limit or thermal-control node was probed on this device. " +
+                "Bomb enables only controls it verified — it does not guess vendor paths.",
+        )
+        return
+    }
+
+    // Composed desired policy. The active policy is shown separately from the
+    // snapshot, so this is what the user is about to apply — not a live readout.
+    var chargeOn by remember { mutableStateOf(snapshot.activeProfile?.chargeLimitPercent != null && canCharge) }
+    var chargePercent by remember {
+        mutableIntStateOf(snapshot.activeProfile?.chargeLimitPercent ?: 80)
+    }
+    var thermalOn by remember { mutableStateOf(snapshot.activeProfile?.maxTemperatureDeciCelsius != null && canThermal) }
+    var maxTempDeci by remember {
+        mutableIntStateOf(snapshot.activeProfile?.maxTemperatureDeciCelsius ?: 450)
+    }
+    var status by remember { mutableStateOf<V6ApplyState>(V6ApplyState.Idle) }
+    val applying = status is V6ApplyState.Applying
+
+    val draft = BombBatteryLabProfile(
+        chargeLimitPercent = if (chargeOn) chargePercent else null,
+        maxTemperatureDeciCelsius = if (thermalOn) maxTempDeci else null,
+        capacityResumeHysteresisPercent = BombBatteryBounds.DEFAULT_CAPACITY_HYSTERESIS_PERCENT,
+        temperatureResumeHysteresisDeciCelsius = BombBatteryBounds.DEFAULT_TEMPERATURE_HYSTERESIS_DECI_CELSIUS,
+    )
+    val violation = BombBatteryBounds.violation(draft)
+
+    BombCard {
+        BombSwitchPreference(
+            title = "Charge limit",
+            summary = if (canCharge) "Stop charging at a level to reduce wear" else "No charge-limit node on this device",
+            checked = chargeOn,
+            onCheckedChange = { chargeOn = it },
+            enabled = canCharge && !applying,
+        )
+        if (chargeOn) {
+            BombRowDivider()
+            BombSliderPreference(
+                title = "Limit",
+                value = chargePercent.toFloat(),
+                onValueChange = { chargePercent = it.toInt() },
+                valueLabel = "$chargePercent%",
+                valueRange = BombBatteryBounds.MIN_CHARGE_LIMIT_PERCENT.toFloat()..
+                    BombBatteryBounds.MAX_CHARGE_LIMIT_PERCENT.toFloat(),
+                steps = 0,
+                enabled = canCharge && !applying,
+            )
+        }
+        BombRowDivider()
+        BombSwitchPreference(
+            title = "Temperature limit",
+            summary = if (canThermal) "Pause charging above a battery temperature" else "No thermal-control node on this device",
+            checked = thermalOn,
+            onCheckedChange = { thermalOn = it },
+            enabled = canThermal && !applying,
+        )
+        if (thermalOn) {
+            BombRowDivider()
+            BombSliderPreference(
+                title = "Max temperature",
+                value = (maxTempDeci / 10f),
+                onValueChange = { maxTempDeci = (it * 10).toInt() },
+                valueLabel = deciToC(maxTempDeci),
+                valueRange = (BombBatteryBounds.MIN_TEMPERATURE_DECI_CELSIUS / 10f)..
+                    (BombBatteryBounds.MAX_TEMPERATURE_DECI_CELSIUS / 10f),
+                steps = 0,
+                enabled = canThermal && !applying,
+            )
+        }
+    }
+
+    BombCard {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ActiveLine("Active profile", describeProfile(snapshot.activeProfile))
+            ActiveLine(
+                "Charging suspended by Bomb",
+                if (snapshot.chargingSuspendedByBomb) "Yes" else "No",
+            )
+            snapshot.lastDecisionReason?.let { ActiveLine("Last decision", it) }
+
+            if (violation != null) {
+                Text(text = violation, fontSize = 12.sp, color = BombTheme.colors.warn)
+            }
+            V6ApplyStatusLine(status)
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        status = V6ApplyState.Applying
+                        if (controller == null) {
+                            status = V6ApplyState.Done(NOT_CONNECTED)
+                        } else {
+                            controller.setBatteryLabProfile(draft) { result ->
+                                status = V6ApplyState.Done(result)
+                                if (result.isSuccess) onApplied()
+                            }
+                        }
+                    },
+                    enabled = controller != null && !applying && violation == null,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColorsPrimary(),
+                ) {
+                    Text(text = if (applying) "Applying…" else "Apply profile")
+                }
+                Button(
+                    onClick = {
+                        status = V6ApplyState.Applying
+                        if (controller == null) {
+                            status = V6ApplyState.Done(NOT_CONNECTED)
+                        } else {
+                            controller.clearBatteryLabProfile { result ->
+                                status = V6ApplyState.Done(result)
+                                if (result.isSuccess) onApplied()
+                            }
+                        }
+                    },
+                    enabled = controller != null && !applying && snapshot.activeProfile != null,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(),
+                ) {
+                    Text(text = "Clear profile")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActiveLine(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            fontSize = 13.sp,
+            color = BombTheme.miuix.onSurfaceVariantSummary,
+        )
+        Text(
+            text = value,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            color = BombTheme.miuix.onSurface,
+        )
+    }
+}
+
+private fun describeProfile(profile: BombBatteryLabProfile?): String {
+    if (profile == null) return "None"
+    val parts = buildList {
+        profile.chargeLimitPercent?.let { add("charge ≤ $it%") }
+        profile.maxTemperatureDeciCelsius?.let { add("temp ≤ ${deciToC(it)}") }
+    }
+    return if (parts.isEmpty()) "None" else parts.joinToString(" · ")
+}
+
+private fun deciToC(deci: Int?): String {
+    if (deci == null) return "—"
+    val whole = deci / 10
+    val frac = kotlin.math.abs(deci % 10)
+    return "$whole.$frac°C"
+}
+
+@Composable
+private fun InfoCard(text: String, error: Boolean = false) {
+    BombCard {
+        Text(
+            text = text,
+            modifier = Modifier.padding(16.dp),
+            fontSize = 13.sp,
+            color = if (error) BombTheme.colors.critical else BombTheme.miuix.onSurfaceVariantSummary,
         )
     }
 }
@@ -188,3 +425,5 @@ private fun BatteryHeader(system: SystemView) {
         }
     }
 }
+
+private val NOT_CONNECTED = BombOperationResult("BACKEND_UNAVAILABLE", "Service is not connected")

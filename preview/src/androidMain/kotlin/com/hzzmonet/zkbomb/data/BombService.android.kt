@@ -7,6 +7,8 @@ import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -21,9 +23,19 @@ import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot
 import com.hzzmonet.zkbomb.api.BatteryLabProfileParcel
 import com.hzzmonet.zkbomb.api.BatteryLabSnapshot
 import com.hzzmonet.zkbomb.api.BombCapability
+import com.hzzmonet.zkbomb.api.BombLiveEventParcel
+import com.hzzmonet.zkbomb.api.BridgeEventStatusParcel
+import com.hzzmonet.zkbomb.api.BridgeStatusSnapshot
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel
 import com.hzzmonet.zkbomb.api.IBombService
 import com.hzzmonet.zkbomb.api.MemoryConfig
+import com.hzzmonet.zkbomb.api.PerformanceProfileParcel
+import com.hzzmonet.zkbomb.api.PerformanceProfilesSnapshot
+import com.hzzmonet.zkbomb.api.RecordingBackendStatus
+import com.hzzmonet.zkbomb.api.RecordingRequestParcel
+import com.hzzmonet.zkbomb.api.ThermalGuardianConfigParcel
+import com.hzzmonet.zkbomb.recorder.RecordingStore
+import java.util.concurrent.ConcurrentHashMap
 import com.hzzmonet.zkbomb.api.SettingsAssignmentParcel
 import com.hzzmonet.zkbomb.api.SettingsOverrideParcel
 import com.hzzmonet.zkbomb.api.VisibilityCallerPolicyParcel
@@ -64,7 +76,7 @@ actual fun rememberBombService(): BombServiceState {
                         // land on nothing. Version 2 is where it was appended.
                         runtimeMode = if (version >= 2) service.runtimeMode else "NORMAL",
                         logLevel = logStatus?.effectiveLevel,
-                        controller = AndroidBombServiceController(service, version),
+                        controller = AndroidBombServiceController(service, version, context.applicationContext),
                     )
                 }.getOrElse { error ->
                     BombServiceState(
@@ -123,8 +135,14 @@ actual fun rememberBombService(): BombServiceState {
 private class AndroidBombServiceController(
     private val service: IBombService,
     private val apiVersion: Int,
+    private val appContext: Context,
 ) : BombServiceController {
     private val main = Handler(Looper.getMainLooper())
+
+    // Platform-recording start times keyed by session id, so a finished capture
+    // can be committed to the store with a real duration. Best-effort: lost across
+    // a process restart, in which case the row is committed with an unknown length.
+    private val recordingStartedAt = ConcurrentHashMap<String, Long>()
 
     override fun getFreezeStatus(
         packageName: String,
@@ -367,6 +385,126 @@ private class AndroidBombServiceController(
             service.clearBatteryLabProfile()
         }
 
+    override fun getBridgeStatus(onResult: (BombBridgeStatus?) -> Unit) =
+        runAsync("bridge-status", onFailure = null, onResult = onResult) {
+            if (apiVersion < MIN_BRIDGE_VERSION) return@runAsync null
+            service.bridgeStatus?.toCommon()
+        }
+
+    override fun publishLiveEvent(event: BombLiveEvent, onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_BRIDGE_VERSION, "bridge-publish", onResult) {
+            service.publishLiveEvent(event.toParcel())
+        }
+
+    override fun dismissLiveEvent(eventId: String, onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_BRIDGE_VERSION, "bridge-dismiss", onResult) {
+            service.dismissLiveEvent(eventId)
+        }
+
+    override fun getPerformanceProfiles(onResult: (BombPerformanceProfilesSnapshot?) -> Unit) =
+        runAsync("performance-profiles", onFailure = null, onResult = onResult) {
+            if (apiVersion < MIN_BRIDGE_VERSION) return@runAsync null
+            service.performanceProfiles?.toCommon()
+        }
+
+    override fun setPerformanceProfile(profileName: String, onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_BRIDGE_VERSION, "performance-set", onResult) {
+            service.setPerformanceProfile(profileName)
+        }
+
+    override fun clearPerformanceProfile(onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_BRIDGE_VERSION, "performance-clear", onResult) {
+            service.clearPerformanceProfile()
+        }
+
+    override fun setThermalGuardianConfig(
+        config: BombThermalGuardianConfig,
+        onResult: (BombOperationResult) -> Unit,
+    ) = runGuardedOperation(MIN_BRIDGE_VERSION, "thermal-guardian-set", onResult) {
+        service.setThermalGuardianConfig(config.toParcel())
+    }
+
+    override fun clearThermalGuardianConfig(onResult: (BombOperationResult) -> Unit) =
+        runGuardedOperation(MIN_BRIDGE_VERSION, "thermal-guardian-clear", onResult) {
+            service.clearThermalGuardianConfig()
+        }
+
+    override fun getRecordingBackendStatus(onResult: (BombRecordingBackendStatus?) -> Unit) =
+        runAsync("recording-status", onFailure = null, onResult = onResult) {
+            if (apiVersion < MIN_RECORDING_VERSION) return@runAsync null
+            service.recordingBackendStatus?.toCommon()
+        }
+
+    override fun startCallRecording(kind: String, onResult: (BombOperationResult) -> Unit) =
+        runAsync(
+            name = "call-record-start",
+            onFailure = BombOperationResult("BACKEND_UNAVAILABLE", "Binder call failed"),
+            onResult = onResult,
+        ) {
+            if (apiVersion < MIN_RECORDING_VERSION) {
+                return@runAsync BombOperationResult(
+                    "UNSUPPORTED",
+                    "The connected service is older than v$MIN_RECORDING_VERSION",
+                )
+            }
+            // The backend records into a caller-owned fd only — never a path. Allocate
+            // the output in the shared recordings store so a finished capture lists and
+            // is subject to the same retention as VoIP recordings.
+            val store = RecordingStore(appContext)
+            val allocation = store.allocate()
+            val descriptor = ParcelFileDescriptor.open(
+                allocation.file,
+                ParcelFileDescriptor.MODE_READ_WRITE or ParcelFileDescriptor.MODE_CREATE,
+            )
+            val result = descriptor.use { fd ->
+                // AAC/m4a is the only format the platform backend accepts; the session
+                // id doubles as the store id so Stop can commit the same file.
+                service.startCallRecording(
+                    RecordingRequestParcel(allocation.id, kind, "AAC_M4A"),
+                    fd,
+                )
+            }
+            val mapped = BombOperationResult(result.status.name, result.detail)
+            if (mapped.isSuccess) {
+                recordingStartedAt[allocation.id] = SystemClock.elapsedRealtime()
+            } else {
+                // Nothing was captured — do not leave an orphan file behind.
+                store.delete(allocation.id)
+            }
+            mapped
+        }
+
+    override fun stopCallRecording(sessionId: String, onResult: (BombOperationResult) -> Unit) =
+        runAsync(
+            name = "call-record-stop",
+            onFailure = BombOperationResult("BACKEND_UNAVAILABLE", "Binder call failed"),
+            onResult = onResult,
+        ) {
+            if (apiVersion < MIN_RECORDING_VERSION) {
+                return@runAsync BombOperationResult(
+                    "UNSUPPORTED",
+                    "The connected service is older than v$MIN_RECORDING_VERSION",
+                )
+            }
+            val result = service.stopCallRecording(sessionId)
+            val mapped = BombOperationResult(result.status.name, result.detail)
+            if (mapped.isSuccess) {
+                val startedAt = recordingStartedAt.remove(sessionId)
+                val durationMillis = startedAt?.let { (SystemClock.elapsedRealtime() - it).coerceAtLeast(0) } ?: 0L
+                // Commit metadata so the finished capture lists. The silent flag is
+                // left false here; the status card surfaces a SILENT last-outcome
+                // directly, which is where a silent platform capture is honestly shown.
+                RecordingStore(appContext).commit(
+                    id = sessionId,
+                    packageName = "Platform call recording",
+                    startedAtEpochMillis = System.currentTimeMillis() - durationMillis,
+                    durationMillis = durationMillis,
+                    silent = false,
+                )
+            }
+            mapped
+        }
+
     /**
      * Run a write guarded on a minimum contract version: an older service does not
      * have the transaction, so asking would land on nothing — return UNSUPPORTED
@@ -469,6 +607,12 @@ private class AndroidBombServiceController(
 
         // Battery Lab (getBatteryLabSnapshot/set/clear) was appended in v9.
         const val MIN_BATTERY_LAB_VERSION = 9
+
+        // Bridge + Performance Profiles + Thermal Guardian were appended in v10.
+        const val MIN_BRIDGE_VERSION = 10
+
+        // Call / VoIP platform recording (status/start/stop) was appended in v11.
+        const val MIN_RECORDING_VERSION = 11
     }
 }
 
@@ -641,6 +785,82 @@ private fun BatteryLabSnapshot.toCommon(): BombBatteryLabSnapshot = BombBatteryL
     activeProfile = activeProfile?.toCommon(),
     chargingSuspendedByBomb = chargingSuspendedByBomb,
     lastDecisionReason = lastDecisionReason,
+)
+
+private fun BridgeEventStatusParcel.toCommon(): BombBridgeEventStatus =
+    BombBridgeEventStatus(eventId = eventId, renderer = renderer, state = state, updatedAtMillis = updatedAtMillis)
+
+private fun BridgeStatusSnapshot.toCommon(): BombBridgeStatus = BombBridgeStatus(
+    notificationAvailable = notificationAvailable,
+    liveUpdateAvailable = liveUpdateAvailable,
+    hyperIslandFeaturePresent = hyperIslandFeaturePresent,
+    hyperIslandProtocolVersion = hyperIslandProtocolVersion,
+    hyperIslandPermitted = hyperIslandPermitted,
+    hyperIslandPayloadAdapterAvailable = hyperIslandPayloadAdapterAvailable,
+    activeEvents = activeEvents.map { it.toCommon() },
+)
+
+private fun BombLiveEvent.toParcel(): BombLiveEventParcel = BombLiveEventParcel(
+    id = id,
+    sourcePackage = sourcePackage,
+    type = type,
+    title = title,
+    subtitle = subtitle,
+    compactText = compactText,
+    progressFraction = progressFraction,
+    progressIndeterminate = progressIndeterminate,
+    state = state,
+    // Common UI code has no wall clock; stamp it here (the only side that does)
+    // when the caller left it unset, so the event carries a real publish time.
+    timestampMillis = if (timestampMillis > 0L) timestampMillis else System.currentTimeMillis(),
+)
+
+private fun PerformanceProfileParcel.toCommon(): BombPerformanceProfileDef = BombPerformanceProfileDef(
+    name = name,
+    swappiness = swappiness,
+    pageCluster = pageCluster,
+    refreshRateHz = refreshRateHz,
+    cpuStrategy = cpuStrategy,
+    gpuStrategy = gpuStrategy,
+    thermalStrategy = thermalStrategy,
+    monitorPreset = monitorPreset,
+)
+
+private fun ThermalGuardianConfigParcel.toCommon(): BombThermalGuardianConfig = BombThermalGuardianConfig(
+    sustainableAtDeciCelsius = sustainableAtDeciCelsius,
+    ecoAtDeciCelsius = ecoAtDeciCelsius,
+    restoreAtDeciCelsius = restoreAtDeciCelsius,
+    cooldownMillis = cooldownMillis,
+)
+
+private fun BombThermalGuardianConfig.toParcel(): ThermalGuardianConfigParcel = ThermalGuardianConfigParcel(
+    sustainableAtDeciCelsius = sustainableAtDeciCelsius,
+    ecoAtDeciCelsius = ecoAtDeciCelsius,
+    restoreAtDeciCelsius = restoreAtDeciCelsius,
+    cooldownMillis = cooldownMillis,
+)
+
+private fun PerformanceProfilesSnapshot.toCommon(): BombPerformanceProfilesSnapshot =
+    BombPerformanceProfilesSnapshot(
+        profiles = profiles.map { it.toCommon() },
+        activeProfile = activeProfile,
+        memoryControlAvailable = memoryControlAvailable,
+        appliedFields = appliedFields,
+        thermalGuardianConfig = thermalGuardianConfig?.toCommon(),
+        thermalGuardianActiveProfile = thermalGuardianActiveProfile,
+    )
+
+private fun RecordingBackendStatus.toCommon(): BombRecordingBackendStatus = BombRecordingBackendStatus(
+    state = state,
+    activeSessionId = activeSessionId,
+    activeKind = activeKind,
+    startedAtElapsedRealtimeMillis = startedAtElapsedRealtimeMillis,
+    cellularSupport = VoipCaptureSupport.fromName(cellularSupport),
+    voipSupport = VoipCaptureSupport.fromName(voipSupport),
+    capturePermissionHeld = capturePermissionHeld,
+    activeClientSilenced = activeClientSilenced,
+    lastOutcome = lastOutcome,
+    lastPeakAmplitude = lastPeakAmplitude,
 )
 
 /**
