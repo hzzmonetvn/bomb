@@ -9,7 +9,7 @@ Deliberately small, because only a small amount is currently justified.
 
 `BombCoreService` remains an app-bound service, but privileged ROM writes cross
 the init-owned `bombd` socket. The package is assigned the dedicated `bomb_app`
-domain; that domain has no property-service, sysfs or shell permission.
+domain; that domain has no property-service, sysfs-write or shell permission.
 
 The first policy-backed write path is intentionally narrow: `bomb_app` may only
 connect to `bombd`; `bombd` may set `bomb_control_prop`; init performs the fixed
@@ -36,8 +36,9 @@ Two things that would normally need policy, and do not:
 
 ## What is deliberately not here
 
-- Broad device-node access. Current `bombd` writes only typed request properties;
-  init owns the two fixed memory paths and log-service transitions.
+- Broad device-node access. Bomb has narrow read-only telemetry access to the
+  target's battery/USB supply labels; current `bombd` writes only typed request
+  properties and init owns every fixed sysfs write.
 - **Any rule for the root-mode module.** In root mode the module runs in the root
   manager's own domain and does not use Bomb's types. Two delivery paths for the
   same policy is risk R13; the answer is to author once and generate both, not to

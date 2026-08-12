@@ -26,6 +26,12 @@ allow bomb_app sysfs_zram:file { read getattr open };
 # different type on the target needs the matching read rule added here.
 allow bomb_app sysfs_batteryinfo:dir { read getattr open search };
 allow bomb_app sysfs_batteryinfo:file { read getattr open };
+allow bomb_app sysfs_battery_supply:dir { read getattr open search };
+allow bomb_app sysfs_battery_supply:file { read getattr open };
+allow bomb_app vendor_sysfs_battery_supply:dir { read getattr open search };
+allow bomb_app vendor_sysfs_battery_supply:file { read getattr open };
+allow bomb_app vendor_sysfs_usb_supply:dir { read getattr open search };
+allow bomb_app vendor_sysfs_usb_supply:file { read getattr open };
 allow bomb_app cgroup:dir { read getattr open search };
 allow bomb_app cgroup:file { read getattr open };
 
@@ -45,3 +51,9 @@ allow vendor_init bomb_memory_proc:file { write lock append map open };
 # dependency explicitly so the control plane does not rely on an implicit rule.
 allow init sysfs_batteryinfo:file { open write append getattr };
 allow vendor_init sysfs_batteryinfo:file { open write append getattr };
+allow init sysfs_battery_supply:file { open write append getattr };
+allow vendor_init sysfs_battery_supply:file { open write append getattr };
+allow init vendor_sysfs_battery_supply:file { open write append getattr };
+allow vendor_init vendor_sysfs_battery_supply:file { open write append getattr };
+allow init vendor_sysfs_usb_supply:file { open write append getattr };
+allow vendor_init vendor_sysfs_usb_supply:file { open write append getattr };
