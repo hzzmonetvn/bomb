@@ -150,7 +150,7 @@ internal class AndroidPlatformRecordingPort(private val context: Context) : Plat
 
 class PlatformRecordingBackend internal constructor(
     private val port: PlatformRecordingPort,
-    private val elapsedRealtime: () -> Long = { android.os.SystemClock.elapsedRealtime() },
+    private val elapsedRealtime: () -> Long,
     private val onSessionEnded: () -> Unit = {},
 ) {
     private val support = RecordingKind.entries.associateWith { CaptureSupport.UNPROBED }.toMutableMap()
@@ -169,7 +169,7 @@ class PlatformRecordingBackend internal constructor(
             runCatching { sink.close() }
             return BombResult.failed("A recording session is already active")
         }
-        if (!runCatching { sink.isValid() }.getOrDefault(false) && sink.fileDescriptor == null) {
+        if (!runCatching { sink.isValid() }.getOrDefault(false)) {
             runCatching { sink.close() }
             return BombResult.invalidArgument("output descriptor is invalid")
         }

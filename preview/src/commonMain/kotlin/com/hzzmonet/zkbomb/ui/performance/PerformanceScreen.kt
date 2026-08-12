@@ -199,23 +199,31 @@ private fun ClockControlSection(state: PreviewUiState, service: BombServiceState
                 InfoCard(ui.message, error = true)
 
             is ClockControlUiState.Ready -> {
-                if (ui.snapshot.domains.isEmpty()) {
-                    BombCard { BombEmptyState("No controllable clock domains were probed") }
+                if (ui.snapshot.targets.isEmpty()) {
+                    BombCard { BombEmptyState("No CPU/GPU frequency targets were probed") }
                 } else {
-                    ui.snapshot.domains.forEach { domain ->
+                    ui.snapshot.targets.forEach { target ->
                         ClockDomainCard(
-                            domain = domain,
+                            domain = target,
                             controllerAvailable = controller != null,
-                            onApply = { id, minKHz, maxKHz, onResult ->
+                            onApply = { selected, minMHz, maxMHz, onResult ->
                                 if (controller == null) onResult(NOT_CONNECTED)
-                                else controller.setClockRange(id, minKHz, maxKHz) { result ->
+                                else controller.setFrequencyLimits(
+                                    selected.id,
+                                    selected.kind,
+                                    minMHz,
+                                    maxMHz,
+                                ) { result ->
                                     onResult(result)
                                     if (result.isSuccess) refreshKey++
                                 }
                             },
-                            onReset = { id, onResult ->
+                            onReset = { selected, onResult ->
                                 if (controller == null) onResult(NOT_CONNECTED)
-                                else controller.clearClockRange(id) { result ->
+                                else controller.resetFrequencyLimits(
+                                    selected.id,
+                                    selected.kind,
+                                ) { result ->
                                     onResult(result)
                                     if (result.isSuccess) refreshKey++
                                 }
@@ -232,48 +240,48 @@ private fun ClockControlSection(state: PreviewUiState, service: BombServiceState
 private fun ClockDomainCard(
     domain: BombClockDomain,
     controllerAvailable: Boolean,
-    onApply: (String, Int, Int, (com.hzzmonet.zkbomb.data.BombOperationResult) -> Unit) -> Unit,
-    onReset: (String, (com.hzzmonet.zkbomb.data.BombOperationResult) -> Unit) -> Unit,
+    onApply: (BombClockDomain, Int, Int, (com.hzzmonet.zkbomb.data.BombOperationResult) -> Unit) -> Unit,
+    onReset: (BombClockDomain, (com.hzzmonet.zkbomb.data.BombOperationResult) -> Unit) -> Unit,
 ) {
     // Keyed on the stable domain id, not the polled object, so the picks a user is
     // making are not snapped back by the next sampling tick.
-    var minKHz by remember(domain.id) {
-        mutableStateOf(domain.minSelectedKHz ?: domain.floorKHz ?: domain.availableStepsKHz.firstOrNull() ?: 0)
+    var minMHz by remember(domain.id) {
+        mutableStateOf(domain.currentMinMHz ?: domain.floorMHz ?: domain.availableMHz.firstOrNull() ?: 0)
     }
-    var maxKHz by remember(domain.id) {
-        mutableStateOf(domain.maxSelectedKHz ?: domain.ceilingKHz ?: domain.availableStepsKHz.lastOrNull() ?: 0)
+    var maxMHz by remember(domain.id) {
+        mutableStateOf(domain.currentMaxMHz ?: domain.ceilingMHz ?: domain.availableMHz.lastOrNull() ?: 0)
     }
     var status by remember(domain.id) { mutableStateOf<V6ApplyState>(V6ApplyState.Idle) }
     val busy = status is V6ApplyState.Applying
-    val editable = controllerAvailable && domain.controllable
-    val violation = BombClockBounds.violation(domain, minKHz, maxKHz)
+    val editable = controllerAvailable && domain.writable
+    val violation = BombClockBounds.violation(domain, minMHz, maxMHz)
 
     BombCard {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = domain.label,
+                        text = frequencyTargetLabel(domain),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Medium,
                         color = BombTheme.miuix.onSurface,
                     )
                     Text(
-                        text = "Now: ${megahertz(domain.minSelectedKHz)} – ${megahertz(domain.maxSelectedKHz)}",
+                        text = "Now: ${megahertz(domain.currentMinMHz)} – ${megahertz(domain.currentMaxMHz)}",
                         modifier = Modifier.padding(top = 2.dp),
                         fontSize = 12.sp,
                         color = BombTheme.miuix.onSurfaceVariantSummary,
                     )
                 }
-                BombBadge(text = domain.kind, color = BombTheme.colors.accent)
+                BombBadge(text = frequencyKindLabel(domain.kind), color = BombTheme.colors.accent)
             }
         }
         BombRowDivider()
-        StepRow("Minimum", domain.availableStepsKHz, minKHz, editable) { minKHz = it }
+        StepRow("Minimum", domain.availableMHz, minMHz, editable) { minMHz = it }
         BombRowDivider()
-        StepRow("Maximum", domain.availableStepsKHz, maxKHz, editable) { maxKHz = it }
+        StepRow("Maximum", domain.availableMHz, maxMHz, editable) { maxMHz = it }
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (!domain.controllable) {
+            if (!domain.writable) {
                 Text(
                     text = "This domain is read-only on this device.",
                     fontSize = 12.sp,
@@ -286,7 +294,7 @@ private fun ClockDomainCard(
                 Button(
                     onClick = {
                         status = V6ApplyState.Applying
-                        onApply(domain.id, minKHz, maxKHz) { status = V6ApplyState.Done(it) }
+                        onApply(domain, minMHz, maxMHz) { status = V6ApplyState.Done(it) }
                     },
                     enabled = editable && violation == null && !busy,
                     modifier = Modifier.weight(1f),
@@ -295,7 +303,7 @@ private fun ClockDomainCard(
                 Button(
                     onClick = {
                         status = V6ApplyState.Applying
-                        onReset(domain.id) { status = V6ApplyState.Done(it) }
+                        onReset(domain) { status = V6ApplyState.Done(it) }
                     },
                     enabled = editable && !busy,
                     modifier = Modifier.weight(1f),
@@ -311,31 +319,41 @@ private fun ClockDomainCard(
 private fun StepRow(
     label: String,
     steps: List<Int>,
-    selectedKHz: Int,
+    selectedMHz: Int,
     enabled: Boolean,
     onSelect: (Int) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     BombPreference(
         title = label,
-        value = megahertz(selectedKHz),
+        value = megahertz(selectedMHz),
         enabled = enabled,
         onClick = { expanded = !expanded },
     )
     if (expanded) {
         Column(modifier = Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-            steps.forEach { khz ->
+            steps.forEach { mhz ->
                 BombPreference(
-                    title = megahertz(khz),
-                    value = if (khz == selectedKHz) "✓" else null,
-                    onClick = { onSelect(khz); expanded = false },
+                    title = megahertz(mhz),
+                    value = if (mhz == selectedMHz) "✓" else null,
+                    onClick = { onSelect(mhz); expanded = false },
                 )
             }
         }
     }
 }
 
-private fun megahertz(khz: Int?): String = khz?.let { "${it / 1000} MHz" } ?: "—"
+private fun megahertz(mhz: Int?): String = mhz?.let { "$it MHz" } ?: "—"
+
+private fun frequencyTargetLabel(target: BombClockDomain): String =
+    if (target.kind == com.hzzmonet.zkbomb.data.BombClockKind.CPU_POLICY) {
+        "CPU ${target.id}"
+    } else {
+        "GPU"
+    }
+
+private fun frequencyKindLabel(kind: String): String =
+    if (kind == com.hzzmonet.zkbomb.data.BombClockKind.CPU_POLICY) "CPU" else kind
 
 @Composable
 private fun ActiveProfileCard(snapshot: com.hzzmonet.zkbomb.data.BombPerformanceProfilesSnapshot) {

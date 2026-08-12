@@ -42,7 +42,7 @@ data class BombServiceState(
     /**
      * How Bomb is deployed: "NORMAL", "ROM" or "ROOT".
      *
-     * ROM is declared by the image through `persist.sys.zk.bomb=1`. It says the
+     * ROM is declared by the image through `ro.bomb.integrated=1`. It says the
      * integration was intended; [capabilities] still says what works.
      */
     val runtimeMode: String = "NORMAL",
@@ -598,47 +598,51 @@ data class BombRecordingBackendStatus(
     }
 }
 
-// ---- CPU / GPU clock scaling (contract v12) mirror types ------------------
+// ---- CPU / GPU frequency scaling (contract v12) mirror types --------------
 
-/** Which kind of clock a domain drives, by name (v12). */
+/**
+ * A frequency target's kind, by name (v12) — mirrors the backend's
+ * `FrequencyTargetKind`. A CPU policy is one cpufreq cluster (little/big/prime);
+ * GPU is the devfreq node.
+ */
 object BombClockKind {
-    const val CPU = "CPU"
+    const val CPU_POLICY = "CPU_POLICY"
     const val GPU = "GPU"
 }
 
 /**
- * One controllable clock domain, mirroring the backend's per-domain probe.
+ * One frequency-scaling target, mirroring `core-api FrequencyScalingTargetParcel`.
  *
- * A domain is a cpufreq policy (a CPU cluster — little/big/prime) or the GPU
- * devfreq node. [availableStepsKHz] is the exact step ladder the system exposes,
- * probed live and always in **kHz** (sysfs's native unit); the UI divides by 1000
- * to show MHz. Steps are ascending. [minSelectedKHz]/[maxSelectedKHz] are the
- * current scaling window read back, each null when the node is unreadable — shown
- * as "—", never a fabricated value. [controllable] is the backend's verdict on
- * whether writes are supported and permitted; the UI offers Apply only when true.
+ * [availableMHz] is the exact step ladder probed live from the device (ascending,
+ * **MHz** — the backend normalises cpufreq kHz and GPU devfreq Hz to MHz across
+ * Binder). [boostMHz] are the subset of steps the vendor marks as boost. The
+ * current window [currentMinMHz]/[currentMaxMHz] is read back, each null when
+ * unreadable — shown as "—", never a fabricated value. [writable] is the backend's
+ * verdict on whether limits can be applied; the UI offers Apply only when true.
+ * [id] and [kind] are echoed back verbatim in a `setFrequencyLimits` request.
  */
 data class BombClockDomain(
     val id: String,
-    val label: String,
     val kind: String,
-    val availableStepsKHz: List<Int>,
-    val minSelectedKHz: Int?,
-    val maxSelectedKHz: Int?,
-    val controllable: Boolean,
+    val availableMHz: List<Int>,
+    val boostMHz: List<Int>,
+    val currentMinMHz: Int?,
+    val currentMaxMHz: Int?,
+    val writable: Boolean,
 ) {
-    /** The lowest and highest steps the ladder allows, or null when it is empty. */
-    val floorKHz: Int? get() = availableStepsKHz.minOrNull()
-    val ceilingKHz: Int? get() = availableStepsKHz.maxOrNull()
+    /** The lowest and highest advertised steps, or null when the ladder is empty. */
+    val floorMHz: Int? get() = availableMHz.minOrNull()
+    val ceilingMHz: Int? get() = availableMHz.maxOrNull()
 }
 
 /**
- * The CPU/GPU clock snapshot, mirroring the v12 backend. Readable: the domains,
- * their step ladders and current windows are all probed from the system, so the
- * picker offers only frequencies the device actually supports and reads back what
- * the write took.
+ * The CPU/GPU frequency snapshot, mirroring `core-api FrequencyScalingSnapshot`.
+ * Readable: the targets, their ladders and current windows are all probed from the
+ * device, so the picker offers only frequencies it actually supports and reads
+ * back what a write took.
  */
 data class BombClockSnapshot(
-    val domains: List<BombClockDomain>,
+    val targets: List<BombClockDomain>,
 )
 
 /** UI-safe command surface; implementations dispatch Binder work off-main. */
@@ -884,24 +888,34 @@ interface BombServiceController {
     /** Stop the active session whose bounded id exactly matches [sessionId] (v11+). */
     fun stopCallRecording(sessionId: String, onResult: (BombOperationResult) -> Unit)
 
-    // ---- CPU / GPU clock scaling (contract v12, PERFORMANCE_CONTROL) ----
+    // ---- CPU / GPU frequency scaling (contract v12) ----
 
     /**
-     * The CPU/GPU clock domains with their probed step ladders and current
+     * The CPU/GPU targets with their probed step ladders and current
      * windows, or null when the contract is older than v12 or the call fails.
-     * Readable; every frequency is in kHz (v12+).
+     * Readable; every frequency is in MHz (v12+).
      */
-    fun getClockSnapshot(onResult: (BombClockSnapshot?) -> Unit)
+    fun getFrequencyScalingSnapshot(onResult: (BombClockSnapshot?) -> Unit)
 
     /**
-     * Clamp domain [domainId]'s scaling window to [[minKHz], [maxKHz]]. Both must
-     * be steps the domain's ladder actually contains and min ≤ max; the backend
+     * Clamp [targetId]'s scaling window to [[minMHz], [maxMHz]]. Both must be
+     * steps the target's ladder actually contains and min ≤ max; the backend
      * revalidates against the live ladder and returns a result shown verbatim (v12+).
      */
-    fun setClockRange(domainId: String, minKHz: Int, maxKHz: Int, onResult: (BombOperationResult) -> Unit)
+    fun setFrequencyLimits(
+        targetId: String,
+        kind: String,
+        minMHz: Int,
+        maxMHz: Int,
+        onResult: (BombOperationResult) -> Unit,
+    )
 
-    /** Restore domain [domainId] to its full probed range (floor…ceiling) (v12+). */
-    fun clearClockRange(domainId: String, onResult: (BombOperationResult) -> Unit)
+    /** Re-probe [targetId], then restore its fresh full ladder (floor…ceiling) (v12+). */
+    fun resetFrequencyLimits(
+        targetId: String,
+        kind: String,
+        onResult: (BombOperationResult) -> Unit,
+    )
 }
 
 /**
@@ -933,6 +947,8 @@ object BombCapabilityKeys {
     const val FIREWALL = "FIREWALL"
     const val PROXY_GATEWAY = "PROXY_GATEWAY"
     const val PERFORMANCE_CONTROL = "PERFORMANCE_CONTROL"
+    const val CPU_FREQUENCY_CONTROL = "CPU_FREQUENCY_CONTROL"
+    const val GPU_FREQUENCY_CONTROL = "GPU_FREQUENCY_CONTROL"
     const val CHARGE_CONTROL = "CHARGE_CONTROL"
     const val CHARGE_LIMIT_CONTROL = "CHARGE_LIMIT_CONTROL"
     const val THERMAL_CHARGE_CONTROL = "THERMAL_CHARGE_CONTROL"
@@ -959,7 +975,10 @@ object BombCapabilityKeys {
             PACKAGE_VISIBILITY_VIRTUALIZATION, SETTINGS_VIRTUALIZATION,
         ),
         "Network" to listOf(AD_BLOCK, DNS_CONTROL, FIREWALL, PROXY_GATEWAY),
-        "Device" to listOf(PERFORMANCE_CONTROL, CHARGE_CONTROL, CHARGE_LIMIT_CONTROL, THERMAL_CHARGE_CONTROL, ZRAM_CONTROL),
+        "Device" to listOf(
+            PERFORMANCE_CONTROL, CPU_FREQUENCY_CONTROL, GPU_FREQUENCY_CONTROL,
+            CHARGE_CONTROL, CHARGE_LIMIT_CONTROL, THERMAL_CHARGE_CONTROL, ZRAM_CONTROL,
+        ),
         "Automation" to listOf(AUTOMATION_RULES),
         "Logging" to listOf(LOG_REDUCE, LOG_DISABLE),
         "Bridge" to listOf(LIVE_UPDATE_BRIDGE, HYPER_ISLAND_BRIDGE),

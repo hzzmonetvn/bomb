@@ -27,6 +27,9 @@ import com.hzzmonet.zkbomb.api.BombLiveEventParcel
 import com.hzzmonet.zkbomb.api.BridgeEventStatusParcel
 import com.hzzmonet.zkbomb.api.BridgeStatusSnapshot
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel
+import com.hzzmonet.zkbomb.api.FrequencyLimitRequestParcel
+import com.hzzmonet.zkbomb.api.FrequencyScalingSnapshot
+import com.hzzmonet.zkbomb.api.FrequencyScalingTargetParcel
 import com.hzzmonet.zkbomb.api.IBombService
 import com.hzzmonet.zkbomb.api.MemoryConfig
 import com.hzzmonet.zkbomb.api.PerformanceProfileParcel
@@ -432,7 +435,7 @@ private class AndroidBombServiceController(
     override fun getRecordingBackendStatus(onResult: (BombRecordingBackendStatus?) -> Unit) =
         runAsync("recording-status", onFailure = null, onResult = onResult) {
             if (apiVersion < MIN_RECORDING_VERSION) return@runAsync null
-            service.recordingBackendStatus?.toCommon()
+            service.recordingBackendStatus?.also(::finalizeEndedRecording)?.toCommon()
         }
 
     override fun startCallRecording(kind: String, onResult: (BombOperationResult) -> Unit) =
@@ -452,17 +455,21 @@ private class AndroidBombServiceController(
             // is subject to the same retention as VoIP recordings.
             val store = RecordingStore(appContext)
             val allocation = store.allocate()
-            val descriptor = ParcelFileDescriptor.open(
-                allocation.file,
-                ParcelFileDescriptor.MODE_READ_WRITE or ParcelFileDescriptor.MODE_CREATE,
-            )
-            val result = descriptor.use { fd ->
-                // AAC/m4a is the only format the platform backend accepts; the session
-                // id doubles as the store id so Stop can commit the same file.
-                service.startCallRecording(
-                    RecordingRequestParcel(allocation.id, kind, "AAC_M4A"),
-                    fd,
-                )
+            val result = try {
+                ParcelFileDescriptor.open(
+                    allocation.file,
+                    ParcelFileDescriptor.MODE_READ_WRITE or ParcelFileDescriptor.MODE_CREATE,
+                ).use { fd ->
+                    // AAC/m4a is the only format the platform backend accepts; the session
+                    // id doubles as the store id so Stop can commit the same file.
+                    service.startCallRecording(
+                        RecordingRequestParcel(allocation.id, kind, "AAC_M4A"),
+                        fd,
+                    )
+                }
+            } catch (failure: Throwable) {
+                store.delete(allocation.id)
+                throw failure
             }
             val mapped = BombOperationResult(result.status.name, result.detail)
             if (mapped.isSuccess) {
@@ -488,56 +495,82 @@ private class AndroidBombServiceController(
             }
             val result = service.stopCallRecording(sessionId)
             val mapped = BombOperationResult(result.status.name, result.detail)
-            if (mapped.isSuccess) {
-                val startedAt = recordingStartedAt.remove(sessionId)
-                val durationMillis = startedAt?.let { (SystemClock.elapsedRealtime() - it).coerceAtLeast(0) } ?: 0L
-                // Commit metadata so the finished capture lists. The silent flag is
-                // left false here; the status card surfaces a SILENT last-outcome
-                // directly, which is where a silent platform capture is honestly shown.
-                RecordingStore(appContext).commit(
-                    id = sessionId,
-                    packageName = "Platform call recording",
-                    startedAtEpochMillis = System.currentTimeMillis() - durationMillis,
-                    durationMillis = durationMillis,
-                    silent = false,
-                )
-            }
+            // The backend deliberately returns FAILED for a completed-but-silent
+            // capture. Re-read status so both successful and silent terminal files
+            // receive metadata, while genuine failures are removed.
+            service.recordingBackendStatus?.also(::finalizeEndedRecording)
             mapped
         }
 
-    override fun getClockSnapshot(onResult: (BombClockSnapshot?) -> Unit) =
-        runAsync("clock-snapshot", onFailure = null, onResult = onResult) {
-            // The v12 CPU/GPU clock backend is not in this client's contract yet, so
-            // there is no transaction to call — return null, which the UI renders as
-            // "waiting for the backend". When Codex lands getClockSnapshot(), replace
-            // this with: service.clockSnapshot?.toCommon() guarded on MIN_CLOCK_VERSION.
-            if (apiVersion < MIN_CLOCK_VERSION) return@runAsync null
-            null
-        }
+    private fun finalizeEndedRecording(status: RecordingBackendStatus) {
+        if (status.state != "IDLE" || recordingStartedAt.isEmpty()) return
+        val entry = recordingStartedAt.entries.firstOrNull() ?: return
+        if (!recordingStartedAt.remove(entry.key, entry.value)) return
 
-    override fun setClockRange(
-        domainId: String,
-        minKHz: Int,
-        maxKHz: Int,
-        onResult: (BombOperationResult) -> Unit,
-    ) = runAsync(
-        name = "clock-set",
-        onFailure = BombOperationResult("BACKEND_UNAVAILABLE", "Binder call failed"),
-        onResult = onResult,
-    ) {
-        // TODO(v12): guard on MIN_CLOCK_VERSION and call
-        // service.setClockRange(domainId, minKHz, maxKHz) once the contract lands.
-        BombOperationResult("UNSUPPORTED", "CPU/GPU clock control needs the v$MIN_CLOCK_VERSION service")
+        val durationMillis = (SystemClock.elapsedRealtime() - entry.value).coerceAtLeast(0)
+        val store = RecordingStore(appContext)
+        when (status.lastOutcome) {
+            "COMPLETED", "SILENT" -> store.commit(
+                id = entry.key,
+                packageName = "Platform call recording",
+                startedAtEpochMillis = System.currentTimeMillis() - durationMillis,
+                durationMillis = durationMillis,
+                silent = status.lastOutcome == "SILENT",
+            )
+            else -> store.delete(entry.key)
+        }
     }
 
-    override fun clearClockRange(domainId: String, onResult: (BombOperationResult) -> Unit) =
+    override fun getFrequencyScalingSnapshot(onResult: (BombClockSnapshot?) -> Unit) =
+        runAsync("frequency-snapshot", onFailure = null, onResult = onResult) {
+            if (apiVersion < MIN_CLOCK_VERSION) return@runAsync null
+            service.frequencyScalingSnapshot
+                ?.takeIf { it.isStructurallyValid() }
+                ?.toCommon()
+        }
+
+    override fun setFrequencyLimits(
+        targetId: String,
+        kind: String,
+        minMHz: Int,
+        maxMHz: Int,
+        onResult: (BombOperationResult) -> Unit,
+    ) = runGuardedOperation(MIN_CLOCK_VERSION, "frequency-set", onResult) {
+        service.setFrequencyLimits(FrequencyLimitRequestParcel(targetId, kind, minMHz, maxMHz))
+    }
+
+    override fun resetFrequencyLimits(
+        targetId: String,
+        kind: String,
+        onResult: (BombOperationResult) -> Unit,
+    ) =
         runAsync(
-            name = "clock-clear",
+            name = "frequency-reset",
             onFailure = BombOperationResult("BACKEND_UNAVAILABLE", "Binder call failed"),
             onResult = onResult,
         ) {
-            // TODO(v12): service.clearClockRange(domainId) once the contract lands.
-            BombOperationResult("UNSUPPORTED", "CPU/GPU clock control needs the v$MIN_CLOCK_VERSION service")
+            if (apiVersion < MIN_CLOCK_VERSION) {
+                return@runAsync BombOperationResult(
+                    "UNSUPPORTED",
+                    "The connected service is older than v$MIN_CLOCK_VERSION",
+                )
+            }
+            val snapshot = service.frequencyScalingSnapshot
+                ?.takeIf { it.isStructurallyValid() }
+                ?: return@runAsync BombOperationResult(
+                    "BACKEND_UNAVAILABLE",
+                    "A fresh frequency snapshot is unavailable",
+                )
+            val target = snapshot.targets.firstOrNull { it.id == targetId && it.kind == kind }
+                ?: return@runAsync BombOperationResult("UNSUPPORTED", "Frequency target is absent")
+            val floor = target.availableMHz.firstOrNull()
+            val ceiling = target.availableMHz.lastOrNull()
+            if (floor == null || ceiling == null) {
+                return@runAsync BombOperationResult("BACKEND_UNAVAILABLE", "Frequency ladder is empty")
+            }
+            service.setFrequencyLimits(
+                FrequencyLimitRequestParcel(targetId, kind, floor, ceiling),
+            ).let { BombOperationResult(it.status.name, it.detail) }
         }
 
     /**
@@ -649,10 +682,23 @@ private class AndroidBombServiceController(
         // Call / VoIP platform recording (status/start/stop) was appended in v11.
         const val MIN_RECORDING_VERSION = 11
 
-        // CPU/GPU clock scaling (getClockSnapshot/setClockRange/clear) — v12.
+        // CPU/GPU dynamic frequency snapshot and min/max limits — v12.
         const val MIN_CLOCK_VERSION = 12
     }
 }
+
+private fun FrequencyScalingSnapshot.toCommon(): BombClockSnapshot =
+    BombClockSnapshot(targets = targets.map { it.toCommon() })
+
+private fun FrequencyScalingTargetParcel.toCommon(): BombClockDomain = BombClockDomain(
+    id = id,
+    kind = kind,
+    availableMHz = availableMHz,
+    boostMHz = boostMHz,
+    currentMinMHz = currentMinMHz,
+    currentMaxMHz = currentMaxMHz,
+    writable = writable,
+)
 
 private fun com.hzzmonet.zkbomb.api.SelectedProcessMemory.toCommon(): BombSelectedProcessMemory =
     BombSelectedProcessMemory(

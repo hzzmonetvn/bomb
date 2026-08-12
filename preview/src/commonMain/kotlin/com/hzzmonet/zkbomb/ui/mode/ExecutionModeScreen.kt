@@ -79,7 +79,7 @@ private fun ServiceCard(service: BombServiceState) {
             Text(
                 text = when (service.runtimeMode) {
                     "ROM" -> "ROM mode — the image declares Bomb integrated " +
-                        "(persist.sys.zk.bomb=1)"
+                        "(ro.bomb.integrated=1)"
                     "ROOT" -> "Root mode — backend module installed"
                     else -> "Normal app — no privileged backend declared"
                 },

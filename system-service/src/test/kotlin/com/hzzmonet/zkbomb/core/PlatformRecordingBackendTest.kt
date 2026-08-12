@@ -15,7 +15,7 @@ import org.junit.Test
 class PlatformRecordingBackendTest {
     @Test fun `first non-silent live capture verifies cellular capability`() {
         val port = FakePort(AudioCallMode.IN_CALL)
-        val backend = PlatformRecordingBackend(port) { 1_234L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 1_234L })
         val sink = FakeSink()
 
         assertTrue(backend.start(request(RecordingKind.CELLULAR), sink).isSuccess)
@@ -32,7 +32,7 @@ class PlatformRecordingBackendTest {
         val port = FakePort(AudioCallMode.IN_COMMUNICATION).apply {
             stopResult = RecordingCaptureResult(true, true, 9_000)
         }
-        val backend = PlatformRecordingBackend(port) { 5L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 5L })
 
         assertTrue(backend.start(request(RecordingKind.VOIP), FakeSink()).isSuccess)
         assertEquals(BombResult.Status.FAILED, backend.stop("session-1").status)
@@ -44,7 +44,7 @@ class PlatformRecordingBackendTest {
     @Test fun `wrong call mode is refused before capture opens`() {
         val port = FakePort(AudioCallMode.IN_COMMUNICATION)
         val sink = FakeSink()
-        val backend = PlatformRecordingBackend(port) { 0L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 0L })
 
         val result = backend.start(request(RecordingKind.CELLULAR), sink)
 
@@ -56,7 +56,7 @@ class PlatformRecordingBackendTest {
 
     @Test fun `session id mismatch cannot stop another recording`() {
         val port = FakePort(AudioCallMode.IN_CALL)
-        val backend = PlatformRecordingBackend(port) { 0L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 0L })
         backend.start(request(RecordingKind.CELLULAR), FakeSink())
 
         assertEquals(BombResult.Status.PERMISSION_DENIED, backend.stop("other").status)
@@ -66,7 +66,7 @@ class PlatformRecordingBackendTest {
 
     @Test fun `missing privileged permission never opens capture`() {
         val port = FakePort(AudioCallMode.IN_CALL).apply { permission = false }
-        val backend = PlatformRecordingBackend(port) { 0L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 0L })
 
         assertEquals(
             BombResult.Status.PERMISSION_DENIED,
@@ -79,7 +79,7 @@ class PlatformRecordingBackendTest {
     @Test fun `invalid output descriptor is rejected before permissions and capture`() {
         val port = FakePort(AudioCallMode.IN_CALL).apply { permission = false }
         val sink = FakeSink(valid = false)
-        val backend = PlatformRecordingBackend(port) { 0L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 0L })
 
         assertEquals(
             BombResult.Status.INVALID_ARGUMENT,
@@ -107,7 +107,7 @@ class PlatformRecordingBackendTest {
 
     @Test fun `transient open failure may be retried on the next live call`() {
         val port = FakePort(AudioCallMode.IN_COMMUNICATION).apply { openSucceeds = false }
-        val backend = PlatformRecordingBackend(port) { 0L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 0L })
 
         assertEquals(
             BombResult.Status.BACKEND_UNAVAILABLE,
@@ -121,7 +121,7 @@ class PlatformRecordingBackendTest {
 
     @Test fun `second session is refused and its descriptor is closed`() {
         val port = FakePort(AudioCallMode.IN_CALL)
-        val backend = PlatformRecordingBackend(port) { 0L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 0L })
         backend.start(request(RecordingKind.CELLULAR), FakeSink())
         val second = FakeSink()
 
@@ -150,7 +150,7 @@ class PlatformRecordingBackendTest {
     @Test fun `shutdown releases an active descriptor without publishing a completed outcome`() {
         val port = FakePort(AudioCallMode.IN_CALL)
         val sink = FakeSink()
-        val backend = PlatformRecordingBackend(port) { 0L }
+        val backend = PlatformRecordingBackend(port, elapsedRealtime = { 0L })
         backend.start(request(RecordingKind.CELLULAR), sink)
 
         backend.stopForShutdown()

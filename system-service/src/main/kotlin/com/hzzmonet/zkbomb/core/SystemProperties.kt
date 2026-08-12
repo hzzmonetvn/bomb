@@ -1,5 +1,6 @@
 package com.hzzmonet.zkbomb.core
 
+import android.annotation.SuppressLint
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import com.hzzmonet.zkbomb.domain.log.LogLevel
@@ -37,6 +38,7 @@ class SystemPropertyReader {
     /** The property value, or null when unset or unreadable. */
     fun get(key: String): String? = getter?.invoke(key)?.ifEmpty { null }
 
+    @SuppressLint("PrivateApi") // Intentional, capability-probed access for platform-signed ROM mode.
     private fun resolveGetter(): ((String) -> String?)? = runCatching {
         val clazz = Class.forName("android.os.SystemProperties")
         val method = clazz.getMethod("get", String::class.java)

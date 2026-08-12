@@ -36,12 +36,12 @@ sealed interface ClockControlUiState {
 object BombClockBounds {
     const val MIN_VERSION = 12
 
-    /** Reason the composed [minKHz]…[maxKHz] window would be rejected, or null when valid. */
-    fun violation(domain: BombClockDomain, minKHz: Int, maxKHz: Int): String? {
-        if (domain.availableStepsKHz.isEmpty()) return "No frequency steps were probed for ${domain.label}"
-        if (minKHz !in domain.availableStepsKHz) return "Minimum is not one of the probed steps"
-        if (maxKHz !in domain.availableStepsKHz) return "Maximum is not one of the probed steps"
-        if (minKHz > maxKHz) return "Minimum must not exceed maximum"
+    /** Reason the composed [minMHz]…[maxMHz] window would be rejected, or null when valid. */
+    fun violation(target: BombClockDomain, minMHz: Int, maxMHz: Int): String? {
+        if (target.availableMHz.isEmpty()) return "No frequency steps were probed for ${target.id}"
+        if (minMHz !in target.availableMHz) return "Minimum is not one of the probed steps"
+        if (maxMHz !in target.availableMHz) return "Maximum is not one of the probed steps"
+        if (minMHz > maxMHz) return "Minimum must not exceed maximum"
         return null
     }
 }
@@ -90,5 +90,7 @@ fun rememberClockControl(
 
 private suspend fun BombServiceController.awaitClockSnapshot(): BombClockSnapshot? =
     suspendCancellableCoroutine { continuation ->
-        getClockSnapshot { result -> if (continuation.isActive) continuation.resume(result) }
+        getFrequencyScalingSnapshot { result ->
+            if (continuation.isActive) continuation.resume(result)
+        }
     }
