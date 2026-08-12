@@ -255,23 +255,18 @@ class PowerSupplyBackend internal constructor(
     }
 
     /**
-     * Ordered charge-current-limit candidates. `constant_charge_current_max` on the
-     * battery supply is the true CC ceiling and is tried first; `input_current_limit`
-     * on the battery, then on each USB/mains/wireless input, is the fallback. Only
-     * these two enum-owned node names are ever selectable.
+     * Charge-current-limit candidates on the battery supply, in preference order:
+     * `constant_charge_current_max` (the CC-phase ceiling) then `input_current_limit`.
+     *
+     * Deliberately limited to the battery supply and these two enum-owned node
+     * names — exactly the nodes the init trigger in bomb.rc writes. Detecting a node
+     * init does not write (e.g. an input supply's `input_current_limit`) would report
+     * the capability SUPPORTED while the write silently landed nowhere.
      */
-    private fun currentLimitCandidates(battery: String): List<CurrentLimitRef> = buildList {
-        add(CurrentLimitRef(battery, PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX))
-        add(CurrentLimitRef(battery, PowerSupplyNode.INPUT_CURRENT_LIMIT))
-        access.supplyNames()
-            .asSequence()
-            .filter { it != battery && SUPPLY_NAME.matches(it) }
-            .filter { name ->
-                access.read(name, PowerSupplyNode.TYPE)?.lowercase() in
-                    setOf("usb", "mains", "wireless")
-            }
-            .forEach { add(CurrentLimitRef(it, PowerSupplyNode.INPUT_CURRENT_LIMIT)) }
-    }
+    private fun currentLimitCandidates(battery: String): List<CurrentLimitRef> = listOf(
+        CurrentLimitRef(battery, PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX),
+        CurrentLimitRef(battery, PowerSupplyNode.INPUT_CURRENT_LIMIT),
+    )
 
     private fun readCurrentMicroamps(ref: CurrentLimitRef): Int? =
         access.read(ref.supplyName, ref.node)?.toIntOrNull()

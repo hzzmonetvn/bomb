@@ -98,10 +98,12 @@ on property:persist.sys.bomb.memory.page_cluster=*
 # Charge-current cap, in microamps. BombCoreService + PowerSupplyBackend
 # range-validate the value and bombd publishes it as a bounded int; init owns the
 # actual sysfs write here. Non-existent paths fail harmlessly (as with the memcg
-# swappiness fan-out above), so both the battery and bms constant_charge_current_max
-# nodes are covered. Restoring the stock cap is the same trigger with the captured
-# original value, so there is no separate clear path. A device whose charge-current
-# node is elsewhere (e.g. input_current_limit) needs its path added here.
+# swappiness fan-out above). Both node names the backend probes — constant_charge_current_max
+# and input_current_limit — are written on the battery and bms supplies, so whichever
+# node the capability probe selected is the one init writes. Restoring the stock cap
+# is the same trigger with the captured original value; there is no separate clear path.
 on property:persist.sys.bomb.charge.current_max=*
     write /sys/class/power_supply/battery/constant_charge_current_max ${persist.sys.bomb.charge.current_max}
     write /sys/class/power_supply/bms/constant_charge_current_max ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/battery/input_current_limit ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/bms/input_current_limit ${persist.sys.bomb.charge.current_max}
