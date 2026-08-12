@@ -3,6 +3,7 @@ package com.hzzmonet.zkbomb.core
 import com.hzzmonet.zkbomb.api.BombResult
 import com.hzzmonet.zkbomb.domain.automation.PerformanceProfile
 import com.hzzmonet.zkbomb.domain.automation.ResolvedAutomationAction
+import com.hzzmonet.zkbomb.domain.performance.PerformanceProfileCatalog
 
 interface MemoryTuningPort {
     fun available(): Boolean
@@ -15,6 +16,8 @@ interface MemoryTuningPort {
 /** Typed memory-only profile backend; CPU/GPU controls remain honestly unsupported. */
 class PerformanceProfileBackend(private val port: MemoryTuningPort) {
 
+    fun available(): Boolean = port.available() && capture() != null
+
     fun capture(): ResolvedAutomationAction.RestorePerformanceTuning? {
         val swappiness = port.currentSwappiness() ?: return null
         val pageCluster = port.currentPageCluster() ?: return null
@@ -22,9 +25,15 @@ class PerformanceProfileBackend(private val port: MemoryTuningPort) {
     }
 
     fun apply(profile: PerformanceProfile): BombResult {
-        val tuning = TUNINGS[profile]
+        val tuning = PerformanceProfileCatalog.definition(profile)
             ?: return BombResult.unsupported("CUSTOM profile has no validated tuning")
         return applyExact(tuning.swappiness, tuning.pageCluster)
+    }
+
+    fun matches(profile: PerformanceProfile): Boolean {
+        val tuning = PerformanceProfileCatalog.definition(profile) ?: return false
+        return port.currentSwappiness() == tuning.swappiness &&
+            port.currentPageCluster() == tuning.pageCluster
     }
 
     fun restore(action: ResolvedAutomationAction.RestorePerformanceTuning): BombResult =
@@ -57,16 +66,7 @@ class PerformanceProfileBackend(private val port: MemoryTuningPort) {
         )
     }
 
-    private data class Tuning(val swappiness: Int, val pageCluster: Int)
-
     private companion object {
         const val VERIFY_ATTEMPTS = 5
-        val TUNINGS = mapOf(
-            PerformanceProfile.ECO to Tuning(80, 0),
-            PerformanceProfile.BALANCED to Tuning(100, 0),
-            PerformanceProfile.PERFORMANCE to Tuning(160, 0),
-            PerformanceProfile.GAMING to Tuning(200, 0),
-            PerformanceProfile.SUSTAINABLE to Tuning(60, 0),
-        )
     }
 }

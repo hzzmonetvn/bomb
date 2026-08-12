@@ -1,20 +1,27 @@
 package com.hzzmonet.zkbomb.core
 
 import android.app.ActivityManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.Process
+import android.os.ParcelFileDescriptor
 import com.hzzmonet.zkbomb.api.AutomationRuleParcel
 import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot
 import com.hzzmonet.zkbomb.api.BatteryLabProfileParcel
 import com.hzzmonet.zkbomb.api.BatteryLabSnapshot
+import com.hzzmonet.zkbomb.api.BombLiveEventParcel
 import com.hzzmonet.zkbomb.api.BombCapabilities
 import com.hzzmonet.zkbomb.api.BombCapability
 import com.hzzmonet.zkbomb.api.BombResult
 import com.hzzmonet.zkbomb.api.BombRuntimeMode
+import com.hzzmonet.zkbomb.api.BridgeStatusSnapshot
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel
 import com.hzzmonet.zkbomb.api.FreezeStatus
 import com.hzzmonet.zkbomb.api.IBombService
@@ -22,16 +29,21 @@ import com.hzzmonet.zkbomb.api.LogStatus
 import com.hzzmonet.zkbomb.api.MemoryConfig
 import com.hzzmonet.zkbomb.api.MemoryStatus
 import com.hzzmonet.zkbomb.api.PackageSnapshot
+import com.hzzmonet.zkbomb.api.PerformanceProfilesSnapshot
 import com.hzzmonet.zkbomb.api.ProcessSnapshot
+import com.hzzmonet.zkbomb.api.RecordingBackendStatus
+import com.hzzmonet.zkbomb.api.RecordingRequestParcel
 import com.hzzmonet.zkbomb.api.SelectedProcessMemory
 import com.hzzmonet.zkbomb.api.SelectedProcessMemoryStatus
 import com.hzzmonet.zkbomb.api.SettingsAssignmentParcel
 import com.hzzmonet.zkbomb.api.SettingsOverrideParcel
 import com.hzzmonet.zkbomb.api.SystemTelemetrySnapshot
+import com.hzzmonet.zkbomb.api.ThermalGuardianConfigParcel
 import com.hzzmonet.zkbomb.api.VisibilityCallerPolicyParcel
 import com.hzzmonet.zkbomb.domain.freeze.FreezeMode
 import com.hzzmonet.zkbomb.domain.freeze.PackageNameValidator
 import com.hzzmonet.zkbomb.domain.automation.AutomationRuleEngine
+import com.hzzmonet.zkbomb.domain.automation.PerformanceProfile
 import com.hzzmonet.zkbomb.domain.automation.ResolvedAutomationAction
 import com.hzzmonet.zkbomb.domain.log.LogLevel
 import com.hzzmonet.zkbomb.domain.log.LogProfile
@@ -40,6 +52,8 @@ import com.hzzmonet.zkbomb.domain.log.LogTransition
 import com.hzzmonet.zkbomb.domain.memory.ZramConfig
 import com.hzzmonet.zkbomb.domain.memory.ZramConfigValidator
 import com.hzzmonet.zkbomb.domain.model.CapabilityKey
+import com.hzzmonet.zkbomb.domain.recorder.PlatformRecordingPolicy
+import com.hzzmonet.zkbomb.domain.recorder.RecordingKind
 import com.hzzmonet.zkbomb.domain.settings.SettingsNamespace
 import com.hzzmonet.zkbomb.domain.validation.ApiV6InputValidator
 import java.util.concurrent.Executors
@@ -74,6 +88,10 @@ class BombCoreService : Service() {
     private val powerSupplyBackend by lazy { PowerSupplyBackend() }
     private val logReader by lazy { LogStateReader(properties) }
     private val modeDetector by lazy { RuntimeModeDetector(this, properties) }
+    private val liveUpdateBridge by lazy { LiveUpdateBridgeBackend.create(this, properties) }
+    private val platformRecordingBackend by lazy {
+        PlatformRecordingBackend.create(this, ::onRecordingSessionEnded)
+    }
     private val capabilityProbe by lazy {
         CapabilityProbe(
             this,
@@ -85,6 +103,9 @@ class BombCoreService : Service() {
             processTelemetry,
             packageControl,
             powerSupplyBackend,
+            performanceProfileBackend,
+            liveUpdateBridge,
+            platformRecordingBackend,
         )
     }
     private val logPlanner = LogTransitionPlanner()
@@ -123,6 +144,48 @@ class BombCoreService : Service() {
 
                 override fun waitBeforeVerification() {
                     android.os.SystemClock.sleep(MEMORY_VERIFY_DELAY_MS)
+                }
+            },
+        )
+    }
+
+    // ---- Live Updates / Performance Profiles (contract version 10) -------
+
+    private val performanceProfileCoordinator by lazy {
+        PerformanceProfileCoordinator(performanceProfileBackend)
+    }
+    private val phase7Executor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "BombThermalGuardian").apply { isDaemon = true }
+    }
+    private val thermalGuardianSignals by lazy {
+        ThermalGuardianSignalSource(this) { temperature ->
+            runCatching {
+                phase7Executor.execute {
+                    performanceProfileCoordinator.evaluateTemperature(
+                        temperature,
+                        android.os.SystemClock.elapsedRealtime(),
+                    )
+                }
+            }
+        }
+    }
+    private val recordingExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "BombCallRecorder").apply { isDaemon = true }
+    }
+    private val recordingModeSignals by lazy {
+        RecordingModeSignalSource(
+            context = this,
+            executor = recordingExecutor,
+            onModeChanged = modeChanged@ { mode ->
+                val status = platformRecordingBackend.status()
+                val sessionId = status.activeSessionId ?: return@modeChanged
+                val kind = status.activeKind?.let { name ->
+                    RecordingKind.entries.firstOrNull { it.name == name }
+                } ?: return@modeChanged
+                if (mode != PlatformRecordingPolicy.expectedMode(kind)) {
+                    platformRecordingBackend.stop(sessionId)
+                    recordingModeSignals.stop()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
                 }
             },
         )
@@ -195,12 +258,16 @@ class BombCoreService : Service() {
             startBatteryLabSignals()
             batteryLabExecutor.execute { batteryLabCoordinator.resumeAtStartup() }
         }
+        if (performanceProfileCoordinator.hasThermalGuardian()) startThermalGuardianSignals()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (automationRepository.isEnabled()) startAutomationSignals()
         if (batteryLabCoordinator.hasActiveProfile()) startBatteryLabSignals()
-        return if (automationRepository.isEnabled() || batteryLabCoordinator.hasActiveProfile()) {
+        if (performanceProfileCoordinator.hasThermalGuardian()) startThermalGuardianSignals()
+        return if (automationRepository.isEnabled() || batteryLabCoordinator.hasActiveProfile() ||
+            performanceProfileCoordinator.hasThermalGuardian()
+        ) {
             START_STICKY
         } else {
             START_NOT_STICKY
@@ -213,6 +280,13 @@ class BombCoreService : Service() {
         batteryLabSignals.stop()
         batteryLabExecutor.execute { batteryLabCoordinator.pause() }
         batteryLabExecutor.shutdown()
+        thermalGuardianSignals.stop()
+        phase7Executor.execute { performanceProfileCoordinator.clearThermalGuardian() }
+        phase7Executor.shutdown()
+        platformRecordingBackend.stopForShutdown()
+        recordingModeSignals.stop()
+        recordingExecutor.shutdown()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
@@ -732,6 +806,117 @@ class BombCoreService : Service() {
             if (result.isSuccess) batteryLabSignals.stop()
             return result
         }
+
+        // ---- Live Updates / Performance Profiles (contract version 10) ---
+
+        override fun getBridgeStatus(): BridgeStatusSnapshot {
+            if (!validator.isAllowed(Binder.getCallingUid())) {
+                return BridgeStatusSnapshot(false, false, false, 0, false, false, emptyList())
+            }
+            return liveUpdateBridge.snapshot()
+        }
+
+        override fun publishLiveEvent(event: BombLiveEventParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val parsed = event?.toDomain() ?: return BombResult.invalidArgument("event")
+            if (parsed.sourcePackage != packageName) {
+                return BombResult.permissionDenied("sourcePackage does not match the allowed caller")
+            }
+            return liveUpdateBridge.publish(parsed)
+        }
+
+        override fun dismissLiveEvent(eventId: String?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            return liveUpdateBridge.dismiss(eventId ?: return BombResult.invalidArgument("eventId"))
+        }
+
+        override fun getPerformanceProfiles(): PerformanceProfilesSnapshot {
+            if (!validator.isAllowed(Binder.getCallingUid())) {
+                return PerformanceProfilesSnapshot(emptyList(), null, false, emptyList(), null, null)
+            }
+            return performanceProfileCoordinator.snapshot()
+        }
+
+        override fun setPerformanceProfile(profile: String?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val parsed = profile?.let { value ->
+                PerformanceProfile.entries.firstOrNull { it.name == value }
+            } ?: return BombResult.invalidArgument("profile")
+            return performanceProfileCoordinator.setProfile(parsed)
+        }
+
+        override fun clearPerformanceProfile(): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            return performanceProfileCoordinator.clearProfile()
+        }
+
+        override fun setThermalGuardianConfig(config: ThermalGuardianConfigParcel?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val parsed = config?.toDomain() ?: return BombResult.invalidArgument("config")
+            val result = performanceProfileCoordinator.setThermalGuardian(parsed)
+            if (!result.isSuccess) return result
+            if (!startThermalGuardianSignals()) {
+                performanceProfileCoordinator.clearThermalGuardian()
+                return BombResult.backendUnavailable("Battery temperature signal source is unavailable")
+            }
+            startService(Intent(this@BombCoreService, BombCoreService::class.java))
+            return BombResult.success()
+        }
+
+        override fun clearThermalGuardianConfig(): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            val result = performanceProfileCoordinator.clearThermalGuardian()
+            if (result.isSuccess) thermalGuardianSignals.stop()
+            return result
+        }
+
+        // ---- Call / VoIP Recording (contract version 11) -----------------
+
+        override fun getRecordingBackendStatus(): RecordingBackendStatus {
+            if (!validator.isAllowed(Binder.getCallingUid())) return unavailableRecordingStatus()
+            return platformRecordingBackend.status()
+        }
+
+        override fun startCallRecording(
+            request: RecordingRequestParcel?,
+            output: ParcelFileDescriptor?,
+        ): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let {
+                runCatching { output?.close() }
+                return it
+            }
+            val parsed = request?.toDomain()
+            if (parsed == null || output == null) {
+                runCatching { output?.close() }
+                return BombResult.invalidArgument("request and output are required")
+            }
+            if (!startRecordingForeground(parsed.kind.name)) {
+                runCatching { output.close() }
+                return BombResult.backendUnavailable("Recording foreground notification is unavailable")
+            }
+            val result = platformRecordingBackend.start(parsed, ParcelRecordingSink(output))
+            if (!result.isSuccess) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                return result
+            }
+            if (!recordingModeSignals.start()) {
+                platformRecordingBackend.stop(parsed.sessionId)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                return BombResult.backendUnavailable("Audio mode listener is unavailable")
+            }
+            return result
+        }
+
+        override fun stopCallRecording(sessionId: String?): BombResult {
+            validator.verdictFor(Binder.getCallingUid())?.let { return it }
+            if (sessionId == null) return BombResult.invalidArgument("sessionId")
+            val result = platformRecordingBackend.stop(sessionId)
+            if (platformRecordingBackend.status().activeSessionId == null) {
+                recordingModeSignals.stop()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+            return result
+        }
     }
 
     private fun startAutomationSignals(): Boolean {
@@ -741,6 +926,51 @@ class BombCoreService : Service() {
     }
 
     private fun startBatteryLabSignals(): Boolean = batteryLabSignals.start()
+
+    private fun startThermalGuardianSignals(): Boolean = thermalGuardianSignals.start()
+
+    private fun startRecordingForeground(kind: String): Boolean = runCatching {
+        val manager = getSystemService(NotificationManager::class.java)
+            ?: return@runCatching false
+        manager.createNotificationChannel(
+            NotificationChannel(
+                RECORDING_CHANNEL_ID,
+                "Bomb call recording",
+                NotificationManager.IMPORTANCE_LOW,
+            ),
+        )
+        val notification = Notification.Builder(this, RECORDING_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle("Bomb call recorder")
+            .setContentText("Recording ${kind.lowercase()} call audio")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .build()
+        startForeground(
+            RECORDING_NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+        )
+        true
+    }.getOrDefault(false)
+
+    private fun onRecordingSessionEnded() {
+        recordingModeSignals.stop()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    private fun unavailableRecordingStatus() = RecordingBackendStatus(
+        state = "IDLE",
+        activeSessionId = null,
+        activeKind = null,
+        startedAtElapsedRealtimeMillis = null,
+        cellularSupport = "DENIED",
+        voipSupport = "DENIED",
+        capturePermissionHeld = false,
+        activeClientSilenced = null,
+        lastOutcome = null,
+        lastPeakAmplitude = null,
+    )
 
     private fun executeFrameworkWrite(
         capability: BombCapability,
@@ -810,11 +1040,15 @@ class BombCoreService : Service() {
          * 7 — selected-process-only PSS/private-dirty memory sampling.
          * 8 — Bomb Rules CRUD/status plus app/screen automation orchestration.
          * 9 — capability-probed Thermal Guardian and Battery Lab profiles.
+         * 10 — Live Update/HyperIsland bridge and performance/thermal profiles.
+         * 11 — capability-verified platform Call/VoIP recording backend.
          */
-        const val API_VERSION = 9
+        const val API_VERSION = 11
         const val MEMORY_VERIFY_ATTEMPTS = 10
         const val MEMORY_VERIFY_DELAY_MS = 50L
         const val CONTROL_VERIFY_ATTEMPTS = 10
         const val CONTROL_VERIFY_DELAY_MS = 50L
+        const val RECORDING_CHANNEL_ID = "bomb_platform_recording"
+        const val RECORDING_NOTIFICATION_ID = 0xB011
     }
 }

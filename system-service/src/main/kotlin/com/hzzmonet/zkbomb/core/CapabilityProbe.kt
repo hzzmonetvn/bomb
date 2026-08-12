@@ -1,11 +1,12 @@
 package com.hzzmonet.zkbomb.core
 
 import android.content.Context
-import android.content.pm.PackageManager
 import com.hzzmonet.zkbomb.api.BombCapabilities
 import com.hzzmonet.zkbomb.api.BombCapability
 import com.hzzmonet.zkbomb.api.BombResult
 import com.hzzmonet.zkbomb.api.CapabilityState
+import com.hzzmonet.zkbomb.domain.recorder.CaptureSupport
+import com.hzzmonet.zkbomb.domain.recorder.RecordingKind
 
 /**
  * Answers, by probing, what this device and this installation can actually do.
@@ -18,8 +19,8 @@ import com.hzzmonet.zkbomb.api.CapabilityState
  *    when tapped.
  * 2. **Holding a permission is not the same as the operation working.** Where a
  *    permission is genuinely sufficient it is checked; where it is not — call
- *    recording is the clear case — the honest answer is `UNSUPPORTED` until a
- *    real capture probe has run, and that probe does not exist yet.
+ *    recording is the clear case — the honest answer stays `NOT_PROBED` until
+ *    a real session proves non-silent routing on this audio HAL.
  */
 class CapabilityProbe(
     private val context: Context,
@@ -31,6 +32,9 @@ class CapabilityProbe(
     private val processTelemetry: ProcessTelemetryBackend = ProcessTelemetryBackend(context),
     private val packageControl: PackageControlBackend = PackageControlBackend(context, freeze),
     private val powerSupply: PowerSupplyBackend = PowerSupplyBackend(),
+    private val performanceProfiles: PerformanceProfileBackend? = null,
+    private val liveUpdateBridge: LiveUpdateBridgeBackend? = null,
+    private val recording: PlatformRecordingBackend? = null,
 ) {
 
     fun probe(): BombCapabilities {
@@ -150,7 +154,14 @@ class CapabilityProbe(
                 else -> CapabilityState.REQUIRES_ROOT
             },
         )
-        builder.set(BombCapability.PERFORMANCE_CONTROL, CapabilityState.REQUIRES_ROOT)
+        builder.set(
+            BombCapability.PERFORMANCE_CONTROL,
+            if (performanceProfiles?.available() == true) {
+                CapabilityState.SUPPORTED
+            } else {
+                CapabilityState.REQUIRES_ROOT
+            },
+        )
         val powerSupplyCapabilities = powerSupply.capabilities()
         builder.set(
             BombCapability.CHARGE_CONTROL,
@@ -210,24 +221,40 @@ class CapabilityProbe(
         )
 
         // ---- Bridge -----------------------------------------------------------
-        // Posting a notification is public API and is the floor renderer.
+        val bridgeSnapshot = liveUpdateBridge?.snapshot()
         builder.set(
             BombCapability.LIVE_UPDATE_BRIDGE,
-            if (holds("android.permission.POST_NOTIFICATIONS")) {
+            if (bridgeSnapshot?.liveUpdateAvailable == true) {
                 CapabilityState.SUPPORTED
             } else {
                 CapabilityState.UNSUPPORTED
             },
         )
-        // HyperIsland needs three separate signals, none of them checked yet.
-        builder.set(BombCapability.HYPER_ISLAND_BRIDGE, CapabilityState.NOT_PROBED)
+        builder.set(
+            BombCapability.HYPER_ISLAND_BRIDGE,
+            when {
+                bridgeSnapshot == null -> CapabilityState.NOT_PROBED
+                !bridgeSnapshot.hyperIslandFeaturePresent ||
+                    bridgeSnapshot.hyperIslandProtocolVersion == 0 ||
+                    !bridgeSnapshot.hyperIslandPermitted -> CapabilityState.UNSUPPORTED
+                !bridgeSnapshot.hyperIslandPayloadAdapterAvailable ->
+                    CapabilityState.DECLARED_NOT_IMPLEMENTED
+                else -> CapabilityState.SUPPORTED
+            },
+        )
 
         // ---- Recording --------------------------------------------------------
         // Deliberately not derived from permissions. Holding CAPTURE_AUDIO_OUTPUT
         // says nothing about whether VOICE_CALL yields non-silent frames on this
         // ROM, and only a real capture answers that.
-        builder.set(BombCapability.PHONE_RECORDING, CapabilityState.NOT_PROBED)
-        builder.set(BombCapability.VOIP_RECORDING, CapabilityState.UNSUPPORTED)
+        builder.set(
+            BombCapability.PHONE_RECORDING,
+            recordingCapabilityState(RecordingKind.CELLULAR),
+        )
+        builder.set(
+            BombCapability.VOIP_RECORDING,
+            recordingCapabilityState(RecordingKind.VOIP),
+        )
 
         // ---- AirDrop interop ---------------------------------------------------
         builder.set(BombCapability.AIRDROP_INTEROP, airDropState())
@@ -247,9 +274,6 @@ class CapabilityProbe(
         else -> CapabilityState.UNSUPPORTED
     }
 
-    private fun holds(permission: String): Boolean =
-        context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
-
     private fun frameworkPatchState(romMode: Boolean, marker: String): CapabilityState =
         FrameworkBridgeGate.markerOnlyCapabilityState(
             romDeclared = romMode,
@@ -260,6 +284,18 @@ class CapabilityProbe(
         context.packageManager.getPackageInfo(packageName, 0)
         true
     }.getOrDefault(false)
+
+    private fun recordingCapabilityState(kind: RecordingKind): CapabilityState =
+        when (recording?.capabilitySupport(kind)) {
+            CaptureSupport.SUPPORTED -> CapabilityState.SUPPORTED
+            CaptureSupport.UNPROBED,
+            null,
+            -> CapabilityState.NOT_PROBED
+            CaptureSupport.SILENT,
+            CaptureSupport.DENIED,
+            CaptureSupport.UNAVAILABLE,
+            -> CapabilityState.UNSUPPORTED
+        }
 
     private companion object {
         const val MOSEY_PACKAGE = "com.google.android.mosey"

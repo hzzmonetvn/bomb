@@ -47,13 +47,11 @@
         <permission name="android.permission.CHANGE_COMPONENT_ENABLED_STATE" />
 
         <!--
-            VoIP call recording (M17). CAPTURE_VOICE_COMMUNICATION_OUTPUT is what
-            lets AudioPlaybackCapture match USAGE_VOICE_COMMUNICATION and pull the
-            remote party's voice; CAPTURE_AUDIO_OUTPUT is its prerequisite. The
-            recorder's own probe (VoipCaptureProbe) checks exactly these two, so
-            without the grant the feature reports DENIED — capture never silently
-            half-works. The microphone side uses runtime RECORD_AUDIO, which is
-            not a privileged permission and is not listed here.
+            Call recording. Phase 8 uses CAPTURE_AUDIO_OUTPUT for the platform
+            VOICE_CALL uplink+downlink source. The existing MediaProjection VoIP
+            path additionally needs CAPTURE_VOICE_COMMUNICATION_OUTPUT to match
+            USAGE_VOICE_COMMUNICATION. Both paths verify real, non-silent capture;
+            a permission grant alone never produces a SUPPORTED capability.
             preview/src/androidMain/.../recorder/CallAudioCapture.kt
         -->
         <permission name="android.permission.CAPTURE_AUDIO_OUTPUT" />
@@ -98,9 +96,9 @@
         list once the bounded Task Manager backend was implemented.
 
     android.permission.CONTROL_INCALL_EXPERIENCE
-        The cellular (phone) call recording path, which is not implemented — only
-        VoIP is. It arrives with that path, not before. VoIP capture uses
-        CAPTURE_AUDIO_OUTPUT / CAPTURE_VOICE_COMMUNICATION_OUTPUT, now granted above.
+        Phase 8 records through the typed VOICE_CALL audio source and does not
+        control Telecom/InCall UI, routing, or call lifecycle. The permission is
+        therefore still unnecessary and remains deliberately absent.
 
     android.permission.WRITE_SECURE_SETTINGS
         Nothing implemented needs it. It is the single most over-granted

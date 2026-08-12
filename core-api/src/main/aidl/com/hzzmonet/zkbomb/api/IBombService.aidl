@@ -4,20 +4,27 @@ import com.hzzmonet.zkbomb.api.AutomationRuleParcel;
 import com.hzzmonet.zkbomb.api.AutomationRulesSnapshot;
 import com.hzzmonet.zkbomb.api.BatteryLabProfileParcel;
 import com.hzzmonet.zkbomb.api.BatteryLabSnapshot;
+import com.hzzmonet.zkbomb.api.BombLiveEventParcel;
 import com.hzzmonet.zkbomb.api.BombCapabilities;
 import com.hzzmonet.zkbomb.api.BombResult;
+import com.hzzmonet.zkbomb.api.BridgeStatusSnapshot;
 import com.hzzmonet.zkbomb.api.FirewallRuleParcel;
 import com.hzzmonet.zkbomb.api.FreezeStatus;
 import com.hzzmonet.zkbomb.api.LogStatus;
 import com.hzzmonet.zkbomb.api.MemoryConfig;
 import com.hzzmonet.zkbomb.api.MemoryStatus;
 import com.hzzmonet.zkbomb.api.PackageSnapshot;
+import com.hzzmonet.zkbomb.api.PerformanceProfilesSnapshot;
 import com.hzzmonet.zkbomb.api.ProcessSnapshot;
+import com.hzzmonet.zkbomb.api.RecordingBackendStatus;
+import com.hzzmonet.zkbomb.api.RecordingRequestParcel;
 import com.hzzmonet.zkbomb.api.SelectedProcessMemory;
 import com.hzzmonet.zkbomb.api.SettingsAssignmentParcel;
 import com.hzzmonet.zkbomb.api.SettingsOverrideParcel;
 import com.hzzmonet.zkbomb.api.SystemTelemetrySnapshot;
+import com.hzzmonet.zkbomb.api.ThermalGuardianConfigParcel;
 import com.hzzmonet.zkbomb.api.VisibilityCallerPolicyParcel;
+import android.os.ParcelFileDescriptor;
 
 /**
  * The privileged surface. Everything the UI can ask Bomb to do passes through
@@ -338,4 +345,33 @@ interface IBombService {
 
     /** Disable the policy and restore only the control value Bomb captured. */
     BombResult clearBatteryLabProfile();
+
+    // ---- Appended in contract version 10 — Bridge / Performance -----------
+
+    BridgeStatusSnapshot getBridgeStatus();
+    BombResult publishLiveEvent(in BombLiveEventParcel event);
+    BombResult dismissLiveEvent(String eventId);
+
+    PerformanceProfilesSnapshot getPerformanceProfiles();
+    BombResult setPerformanceProfile(String profileName);
+    BombResult clearPerformanceProfile();
+    BombResult setThermalGuardianConfig(in ThermalGuardianConfigParcel config);
+    BombResult clearThermalGuardianConfig();
+
+    // ---- Appended in contract version 11 — Call / VoIP Recording ----------
+
+    /** Capability and active-session metadata; never exposes call content or output paths. */
+    RecordingBackendStatus getRecordingBackendStatus();
+
+    /**
+     * Starts one explicit platform recording into a caller-owned file descriptor.
+     * The backend accepts AAC_M4A only and never accepts a filesystem path.
+     */
+    BombResult startCallRecording(
+        in RecordingRequestParcel request,
+        in ParcelFileDescriptor output
+    );
+
+    /** Stops only the active session whose bounded id exactly matches sessionId. */
+    BombResult stopCallRecording(String sessionId);
 }
