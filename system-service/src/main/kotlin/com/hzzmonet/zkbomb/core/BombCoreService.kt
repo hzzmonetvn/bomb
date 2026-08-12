@@ -60,6 +60,8 @@ import com.hzzmonet.zkbomb.domain.settings.SettingsNamespace
 import com.hzzmonet.zkbomb.domain.validation.ApiV6InputValidator
 import java.util.concurrent.Executors
 
+internal const val CURRENT_BOMB_API_VERSION = 13
+
 /**
  * The bound service behind [IBombService].
  *
@@ -1047,8 +1049,8 @@ class BombCoreService : Service() {
 
     private companion object {
         /**
-         * Bumped only when methods are appended to [IBombService], never for an
-         * implementation change. A client reads it to know which calls exist.
+         * Bumped when methods are appended or a tail-compatible parcel schema is
+         * extended. A client reads it to know which calls/fields exist.
          *
          * 2 — added `getRuntimeMode()`.
          * 3 — added process and system telemetry snapshots.
@@ -1062,8 +1064,9 @@ class BombCoreService : Service() {
          * 10 — Live Update/HyperIsland bridge and performance/thermal profiles.
          * 11 — capability-verified platform Call/VoIP recording backend.
          * 12 — dynamic CPU policy and GPU devfreq min/max limits.
+         * 13 — Battery Lab maximum charge-current fields in existing v9 parcels.
          */
-        const val API_VERSION = 12
+        const val API_VERSION = CURRENT_BOMB_API_VERSION
         const val MEMORY_VERIFY_ATTEMPTS = 10
         const val MEMORY_VERIFY_DELAY_MS = 50L
         const val CONTROL_VERIFY_ATTEMPTS = 10

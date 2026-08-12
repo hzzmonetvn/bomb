@@ -145,21 +145,48 @@ static bool apply_memory(char *field, char *value_text) {
 }
 
 /*
- * Charge-current cap, in microamps. Only the "current_max" field is accepted, and
- * only a bounded microamp value: init owns the actual sysfs write (see bomb.rc),
- * bombd merely publishes the range-checked request property. The bounds match the
- * app-side BatteryLabProfileValidator and PowerSupplyBackend node bounds.
+ * Charge control. init owns the actual sysfs write (see bomb.rc); bombd merely
+ * publishes the range-checked request property. The fields and bounds match the
+ * app-side RomControlPropertyWriter and PowerSupplyBackend:
+ *   current_max       microamps, 100000..20000000
+ *   end_threshold     percent, 0..100
+ *   disable           charge-disable gate, 0/1
+ *   charging_enabled  charging-enabled gate, 0/1
+ *   input_suspend     input-suspend gate, 0/1
  */
 static bool apply_charge(char *field, char *value_text) {
     if (field == NULL || value_text == NULL) return false;
-    int value = 0;
-    if (strcmp(field, "current_max") != 0 ||
-        !parse_int(value_text, 100000, 20000000, &value)) {
+    const char *property = NULL;
+    int minimum = 0;
+    int maximum = 0;
+    if (strcmp(field, "current_max") == 0) {
+        property = "persist.sys.bomb.charge.current_max";
+        minimum = 100000;
+        maximum = 20000000;
+    } else if (strcmp(field, "end_threshold") == 0) {
+        property = "persist.sys.bomb.charge.end_threshold";
+        minimum = 0;
+        maximum = 100;
+    } else if (strcmp(field, "disable") == 0) {
+        property = "persist.sys.bomb.charge.disable";
+        minimum = 0;
+        maximum = 1;
+    } else if (strcmp(field, "charging_enabled") == 0) {
+        property = "persist.sys.bomb.charge.charging_enabled";
+        minimum = 0;
+        maximum = 1;
+    } else if (strcmp(field, "input_suspend") == 0) {
+        property = "persist.sys.bomb.charge.input_suspend";
+        minimum = 0;
+        maximum = 1;
+    } else {
         return false;
     }
+    int value = 0;
+    if (!parse_int(value_text, minimum, maximum, &value)) return false;
     char value_buffer[12];
     snprintf(value_buffer, sizeof(value_buffer), "%d", value);
-    return set_property("persist.sys.bomb.charge.current_max", value_buffer);
+    return set_property(property, value_buffer);
 }
 
 static bool dispatch(char *request) {

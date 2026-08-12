@@ -23,7 +23,7 @@ class BatteryLabPhase6Test {
         ).apply {
             addSupply("usb", PowerSupplyNode.TYPE to "USB", PowerSupplyNode.ONLINE to "1")
         }
-        val backend = PowerSupplyBackend(io) { 1234L }
+        val backend = backend(io) { 1234L }
 
         val snapshot = backend.snapshot(null, false, null)
 
@@ -40,21 +40,48 @@ class BatteryLabPhase6Test {
     }
 
     @Test
-    fun `readable but non-writable nodes never advertise charge control`() {
+    fun `readable control nodes are probed without requiring app sysfs write access`() {
         val io = batteryIo(
             PowerSupplyNode.CAPACITY to "80",
             PowerSupplyNode.TEMP to "390",
             PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD to "100",
             PowerSupplyNode.CHARGE_DISABLE to "0",
         )
-        val caps = PowerSupplyBackend(io) { 0L }.capabilities()
+        val caps = backend(io) { 0L }.capabilities()
 
         assertTrue(caps.telemetry)
         assertTrue(caps.thresholdNodePresent)
         assertTrue(caps.gateNodePresent)
+        assertTrue(caps.chargeLimitControl)
+        assertTrue(caps.thermalChargeControl)
+        assertTrue(caps.anyChargeControl)
+    }
+
+    @Test
+    fun `unreachable bombd keeps readable nodes present but controls disabled`() {
+        val io = batteryIo(
+            PowerSupplyNode.CAPACITY to "80",
+            PowerSupplyNode.TEMP to "390",
+            PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD to "100",
+            PowerSupplyNode.CHARGE_DISABLE to "0",
+            PowerSupplyNode.CURRENT_MAX to "2400000",
+        )
+        val unavailableWriter = object : ChargeControlWriter {
+            override val available = false
+            override fun write(field: String, value: Int) = false
+        }
+        val caps = PowerSupplyBackend(
+            access = io,
+            chargeWriter = unavailableWriter,
+            elapsedRealtimeMillis = { 0L },
+        ).capabilities()
+
+        assertTrue(caps.thresholdNodePresent)
+        assertTrue(caps.gateNodePresent)
+        assertTrue(caps.currentLimitNodePresent)
         assertFalse(caps.chargeLimitControl)
         assertFalse(caps.thermalChargeControl)
-        assertFalse(caps.anyChargeControl)
+        assertFalse(caps.chargeCurrentControl)
     }
 
     @Test
@@ -63,11 +90,9 @@ class BatteryLabPhase6Test {
             PowerSupplyNode.CAPACITY to "70",
             PowerSupplyNode.TEMP to "380",
             PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD to "96",
-        ).apply {
-            writable("battery", PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD)
-        }
+        )
         val store = MemoryBatteryLabStore()
-        val coordinator = BatteryLabCoordinator(PowerSupplyBackend(io) { 0L }, store)
+        val coordinator = BatteryLabCoordinator(backend(io) { 0L }, store)
 
         assertTrue(
             coordinator.setProfile(BatteryLabProfile(chargeLimitPercent = 80)).isSuccess,
@@ -86,11 +111,9 @@ class BatteryLabPhase6Test {
             PowerSupplyNode.CAPACITY to "65",
             PowerSupplyNode.TEMP to "425",
             PowerSupplyNode.CHARGE_DISABLE to "0",
-        ).apply {
-            writable("battery", PowerSupplyNode.CHARGE_DISABLE)
-        }
+        )
         val store = MemoryBatteryLabStore()
-        val coordinator = BatteryLabCoordinator(PowerSupplyBackend(io) { 0L }, store)
+        val coordinator = BatteryLabCoordinator(backend(io) { 0L }, store)
 
         assertTrue(
             coordinator.setProfile(
@@ -118,11 +141,9 @@ class BatteryLabPhase6Test {
             PowerSupplyNode.CAPACITY to "82",
             PowerSupplyNode.TEMP to "370",
             PowerSupplyNode.CHARGING_ENABLED to "1",
-        ).apply {
-            writable("battery", PowerSupplyNode.CHARGING_ENABLED)
-        }
+        )
         val coordinator = BatteryLabCoordinator(
-            PowerSupplyBackend(io) { 0L },
+            backend(io) { 0L },
             MemoryBatteryLabStore(),
         )
 
@@ -148,10 +169,9 @@ class BatteryLabPhase6Test {
                 PowerSupplyNode.ONLINE to "1",
                 PowerSupplyNode.INPUT_SUSPEND to "0",
             )
-            writable("usb", PowerSupplyNode.INPUT_SUSPEND)
         }
         val coordinator = BatteryLabCoordinator(
-            PowerSupplyBackend(io) { 0L },
+            backend(io) { 0L },
             MemoryBatteryLabStore(),
         )
 
@@ -169,11 +189,9 @@ class BatteryLabPhase6Test {
         val io = batteryIo(
             PowerSupplyNode.CAPACITY to "60",
             PowerSupplyNode.CHARGE_DISABLE to "0",
-        ).apply {
-            writable("battery", PowerSupplyNode.CHARGE_DISABLE)
-        }
+        )
         val coordinator = BatteryLabCoordinator(
-            PowerSupplyBackend(io) { 0L },
+            backend(io) { 0L },
             MemoryBatteryLabStore(),
         )
 
@@ -190,12 +208,9 @@ class BatteryLabPhase6Test {
         val io = batteryIo(
             PowerSupplyNode.CAPACITY to "70",
             PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD to "100",
-        ).apply {
-            writable("battery", PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD)
-            acknowledgeWrites = false
-        }
+        ).apply { acknowledgeWrites = false }
         val store = MemoryBatteryLabStore()
-        val result = BatteryLabCoordinator(PowerSupplyBackend(io) { 0L }, store)
+        val result = BatteryLabCoordinator(backend(io) { 0L }, store)
             .setProfile(BatteryLabProfile(chargeLimitPercent = 80))
 
         assertEquals(BombResult.Status.BACKEND_UNAVAILABLE, result.status)
@@ -208,9 +223,7 @@ class BatteryLabPhase6Test {
             PowerSupplyNode.CAPACITY to "70",
             PowerSupplyNode.TEMP to "380",
             PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD to "100",
-        ).apply {
-            writable("battery", PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD)
-        }
+        )
         val capture = CapturedChargeControl(
             ChargeControlRef("battery", ChargeControlKind.CHARGE_CONTROL_END_THRESHOLD),
             originalValue = "95",
@@ -222,7 +235,7 @@ class BatteryLabPhase6Test {
                 thresholdCapture = capture,
             ),
         )
-        val coordinator = BatteryLabCoordinator(PowerSupplyBackend(io) { 0L }, store)
+        val coordinator = BatteryLabCoordinator(backend(io) { 0L }, store)
 
         assertTrue(coordinator.resumeAtStartup().isSuccess)
         assertEquals("80", io.value("battery", PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD))
@@ -235,11 +248,9 @@ class BatteryLabPhase6Test {
         val io = batteryIo(
             PowerSupplyNode.CAPACITY to "70",
             PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD to "96",
-        ).apply {
-            writable("battery", PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD)
-        }
+        )
         val coordinator = BatteryLabCoordinator(
-            PowerSupplyBackend(io) { 0L },
+            backend(io) { 0L },
             MemoryBatteryLabStore(),
         )
         assertTrue(
@@ -249,6 +260,89 @@ class BatteryLabPhase6Test {
         io.set("battery", PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD, "85")
         assertTrue(coordinator.clear().isSuccess)
         assertEquals("85", io.value("battery", PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD))
+    }
+
+    @Test
+    fun `charge current profile captures applies and restores microamp ceiling`() {
+        val io = batteryIo(
+            PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX to "3000000",
+        )
+        val coordinator = BatteryLabCoordinator(backend(io) { 7L }, MemoryBatteryLabStore())
+
+        assertTrue(
+            coordinator.setProfile(
+                BatteryLabProfile(maxChargeCurrentMicroamps = 1_500_000),
+            ).isSuccess,
+        )
+        assertEquals(
+            "1500000",
+            io.value("battery", PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX),
+        )
+        assertEquals(3_000_000, coordinator.snapshot().maxSupportedChargeCurrentMicroamps)
+        assertTrue(coordinator.snapshot().chargeCurrentControlSupported)
+
+        assertTrue(coordinator.clear().isSuccess)
+        assertEquals(
+            "3000000",
+            io.value("battery", PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX),
+        )
+    }
+
+    @Test
+    fun `generic current max is probed as the final vendor fallback`() {
+        val io = batteryIo(PowerSupplyNode.CURRENT_MAX to "2400000")
+        val caps = backend(io) { 0L }.capabilities()
+
+        assertEquals(PowerSupplyNode.CURRENT_MAX, caps.currentLimitControl?.node)
+        assertEquals(2_400_000, caps.advertisedCurrentLimitMicroamps)
+    }
+
+    @Test
+    fun `input supply current limit is dynamically probed`() {
+        val io = batteryIo(PowerSupplyNode.CAPACITY to "70").apply {
+            addSupply(
+                "usb",
+                PowerSupplyNode.TYPE to "USB",
+                PowerSupplyNode.INPUT_CURRENT_LIMIT to "1800000",
+            )
+        }
+
+        val caps = backend(io) { 0L }.capabilities()
+
+        assertEquals("usb", caps.currentLimitControl?.supplyName)
+        assertEquals(PowerSupplyNode.INPUT_CURRENT_LIMIT, caps.currentLimitControl?.node)
+        assertEquals(1_800_000, caps.advertisedCurrentLimitMicroamps)
+    }
+
+    @Test
+    fun `non allowlisted vendor supply is telemetry only and never advertised writable`() {
+        val io = FakePowerSupplyNodeAccess().apply {
+            addSupply(
+                "main-battery",
+                PowerSupplyNode.TYPE to "Battery",
+                PowerSupplyNode.STATUS to "Charging",
+                PowerSupplyNode.CURRENT_MAX to "2400000",
+            )
+        }
+
+        val caps = backend(io) { 0L }.capabilities()
+
+        assertTrue(caps.telemetry)
+        assertFalse(caps.currentLimitNodePresent)
+        assertNull(caps.currentLimitControl)
+    }
+
+    @Test
+    fun `current ceiling cannot raise the vendor advertised maximum`() {
+        val io = batteryIo(PowerSupplyNode.INPUT_CURRENT_LIMIT to "2000000")
+        val store = MemoryBatteryLabStore()
+        val result = BatteryLabCoordinator(backend(io) { 0L }, store).setProfile(
+            BatteryLabProfile(maxChargeCurrentMicroamps = 2_500_000),
+        )
+
+        assertEquals(BombResult.Status.BACKEND_UNAVAILABLE, result.status)
+        assertEquals("2000000", io.value("battery", PowerSupplyNode.INPUT_CURRENT_LIMIT))
+        assertNull(store.state)
     }
 
     private fun batteryIo(
@@ -262,6 +356,15 @@ class BatteryLabPhase6Test {
         )
     }
 
+    private fun backend(
+        io: FakePowerSupplyNodeAccess,
+        elapsedRealtimeMillis: () -> Long,
+    ): PowerSupplyBackend = PowerSupplyBackend(
+        access = io,
+        chargeWriter = io.chargeWriter(),
+        elapsedRealtimeMillis = elapsedRealtimeMillis,
+    )
+
     private class MemoryBatteryLabStore(
         var state: BatteryLabRuntimeState? = null,
     ) : BatteryLabStateStore {
@@ -273,7 +376,6 @@ class BatteryLabPhase6Test {
 
     private class FakePowerSupplyNodeAccess : PowerSupplyNodeAccess {
         private val values = linkedMapOf<Pair<String, PowerSupplyNode>, String>()
-        private val writable = mutableSetOf<Pair<String, PowerSupplyNode>>()
         val writes = mutableListOf<Triple<String, PowerSupplyNode, String>>()
         var acknowledgeWrites = true
 
@@ -282,10 +384,6 @@ class BatteryLabPhase6Test {
             vararg nodes: Pair<PowerSupplyNode, String>,
         ) {
             nodes.forEach { (node, value) -> values[name to node] = value }
-        }
-
-        fun writable(name: String, node: PowerSupplyNode) {
-            writable += name to node
         }
 
         fun set(name: String, node: PowerSupplyNode, value: String) {
@@ -299,18 +397,32 @@ class BatteryLabPhase6Test {
         override fun read(supplyName: String, node: PowerSupplyNode): String? =
             values[supplyName to node]
 
-        override fun canWrite(supplyName: String, node: PowerSupplyNode): Boolean =
-            supplyName to node in writable
+        fun chargeWriter(): ChargeControlWriter = object : ChargeControlWriter {
+            override val available: Boolean get() = true
 
-        override fun write(
-            supplyName: String,
-            node: PowerSupplyNode,
-            value: String,
-        ): Boolean {
-            if (!canWrite(supplyName, node)) return false
-            writes += Triple(supplyName, node, value)
-            if (acknowledgeWrites) values[supplyName to node] = value
-            return true
+            override fun write(field: String, value: Int): Boolean {
+                if (!acknowledgeWrites) return false
+                val node = when (field) {
+                    "end_threshold" -> PowerSupplyNode.CHARGE_CONTROL_END_THRESHOLD
+                    "disable" -> PowerSupplyNode.CHARGE_DISABLE
+                    "charging_enabled" -> PowerSupplyNode.CHARGING_ENABLED
+                    "input_suspend" -> PowerSupplyNode.INPUT_SUSPEND
+                    "current_max" -> listOf(
+                        PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX,
+                        PowerSupplyNode.INPUT_CURRENT_LIMIT,
+                        PowerSupplyNode.CURRENT_MAX,
+                    ).firstOrNull { candidate -> values.keys.any { it.second == candidate } }
+                        ?: return false
+                    else -> return false
+                }
+                val targets = values.keys.filter { it.second == node }
+                if (targets.isEmpty()) return false
+                targets.forEach { (supply, selectedNode) ->
+                    writes += Triple(supply, selectedNode, value.toString())
+                    values[supply to selectedNode] = value.toString()
+                }
+                return true
+            }
         }
     }
 }

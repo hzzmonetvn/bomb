@@ -10,11 +10,12 @@ class BatteryLabApiModelsTest {
 
     @Test
     fun `wire profile validates and converts without changing units`() {
-        val parcel = BatteryLabProfileParcel(80, 420, 5, 30)
+        val parcel = BatteryLabProfileParcel(80, 420, 5, 30, 1_500_000)
         val domain = parcel.toDomain()!!
 
         assertEquals(80, domain.chargeLimitPercent)
         assertEquals(420, domain.maxTemperatureDeciCelsius)
+        assertEquals(1_500_000, domain.maxChargeCurrentMicroamps)
         assertEquals(parcel, BatteryLabProfileParcel.fromDomain(domain))
     }
 
@@ -22,6 +23,8 @@ class BatteryLabApiModelsTest {
     fun `invalid wire profile is rejected before backend access`() {
         assertNull(BatteryLabProfileParcel(20, 900, 0, 0).toDomain())
         assertNull(BatteryLabProfileParcel(null, null).toDomain())
+        assertNull(BatteryLabProfileParcel(null, null, 5, 30, 99_999).toDomain())
+        assertNull(BatteryLabProfileParcel(null, null, 5, 30, 20_000_001).toDomain())
     }
 
     @Test
@@ -33,6 +36,8 @@ class BatteryLabApiModelsTest {
         assertNull(snapshot.temperatureDeciCelsius)
         assertFalse(snapshot.chargeLimitControlSupported)
         assertFalse(snapshot.thermalChargeControlSupported)
+        assertFalse(snapshot.chargeCurrentControlSupported)
+        assertNull(snapshot.maxSupportedChargeCurrentMicroamps)
         assertTrue(!snapshot.chargingSuspendedByBomb)
     }
 }

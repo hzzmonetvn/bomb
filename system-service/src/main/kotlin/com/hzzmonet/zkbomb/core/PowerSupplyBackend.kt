@@ -27,11 +27,14 @@ internal enum class PowerSupplyNode(val fileName: String) {
     CURRENT_MAX("current_max"),
 }
 
+/**
+ * Read-only sysfs access. The app reads the power-supply nodes to probe, snapshot
+ * and check ownership, but it never writes them — every charge write is routed
+ * through [ChargeControlWriter] → bombd → init.
+ */
 internal interface PowerSupplyNodeAccess {
     fun supplyNames(): List<String>
     fun read(supplyName: String, node: PowerSupplyNode): String?
-    fun canWrite(supplyName: String, node: PowerSupplyNode): Boolean
-    fun write(supplyName: String, node: PowerSupplyNode, value: String): Boolean
 }
 
 /** Real sysfs access. The only selectable files are [PowerSupplyNode] entries. */
@@ -55,18 +58,6 @@ internal class RealPowerSupplyNodeAccess(
             }.getOrNull()
         }
 
-    override fun canWrite(supplyName: String, node: PowerSupplyNode): Boolean =
-        resolved(supplyName, node)?.canWrite() == true
-
-    override fun write(supplyName: String, node: PowerSupplyNode, value: String): Boolean {
-        if (!SAFE_VALUE.matches(value)) return false
-        val file = resolved(supplyName, node) ?: return false
-        return runCatching {
-            file.outputStream().bufferedWriter(Charsets.US_ASCII).use { it.write(value) }
-            true
-        }.getOrDefault(false)
-    }
-
     private fun resolved(supplyName: String, node: PowerSupplyNode): File? {
         if (!SUPPLY_NAME.matches(supplyName)) return null
         val supply = File(root, supplyName)
@@ -80,15 +71,34 @@ internal class RealPowerSupplyNodeAccess(
     private companion object {
         const val MAX_NODE_TEXT = 128
         val SUPPLY_NAME = Regex("^[A-Za-z0-9_.-]{1,64}$")
-        val SAFE_VALUE = Regex("^-?[0-9]{1,12}$")
     }
 }
 
-internal enum class ChargeControlKind {
-    CHARGE_CONTROL_END_THRESHOLD,
-    CHARGE_DISABLE,
-    CHARGING_ENABLED,
-    INPUT_SUSPEND,
+/**
+ * Publishes a charge-control write through the init-owned control plane. The
+ * process never writes the sysfs node: [field] names a bounded request property
+ * (`current_max`, `end_threshold`, `disable`, `charging_enabled`, `input_suspend`)
+ * that bombd range-checks and sets, and init's bomb.rc trigger performs the write.
+ */
+internal interface ChargeControlWriter {
+    val available: Boolean
+    fun write(field: String, value: Int): Boolean
+}
+
+internal class BombdChargeControlWriter(
+    private val control: RomControlPropertyWriter = RomControlPropertyWriter(),
+) : ChargeControlWriter {
+    override val available: Boolean get() = control.available
+
+    override fun write(field: String, value: Int): Boolean =
+        control.requestChargeControl(field, value)
+}
+
+internal enum class ChargeControlKind(val field: String) {
+    CHARGE_CONTROL_END_THRESHOLD("end_threshold"),
+    CHARGE_DISABLE("disable"),
+    CHARGING_ENABLED("charging_enabled"),
+    INPUT_SUSPEND("input_suspend"),
 }
 
 internal data class ChargeControlRef(
@@ -179,13 +189,11 @@ internal data class PowerSupplyCapabilities(
 /** Capability-probed, allowlisted backend for `/sys/class/power_supply`. */
 class PowerSupplyBackend internal constructor(
     private val access: PowerSupplyNodeAccess = RealPowerSupplyNodeAccess(),
-    // Charge-current writes never touch sysfs from this process: they are published
-    // as a bounded request through bombd, and init owns the actual node write. The
-    // app only reads the node back (to capture and to check ownership). Kept ahead
+    // No charge write touches sysfs from this process: threshold, gate and current
+    // are all published as bounded requests through bombd, and init owns the node
+    // write. The app only reads back (to capture and to check ownership). Kept ahead
     // of elapsedRealtimeMillis so the latter stays the trailing-lambda parameter.
-    private val chargeCurrentWriter: (Int) -> Boolean = { microamps ->
-        RomControlPropertyWriter().requestChargeCurrentMax(microamps)
-    },
+    private val chargeWriter: ChargeControlWriter = BombdChargeControlWriter(),
     private val elapsedRealtimeMillis: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
     internal fun capabilities(): PowerSupplyCapabilities {
@@ -204,42 +212,56 @@ class PowerSupplyBackend internal constructor(
             access.read(battery, PowerSupplyNode.STATUS) != null ||
             readLong(battery, PowerSupplyNode.VOLTAGE_NOW) != null
 
-        val thresholdCandidate = controlIfPresent(
-            battery,
-            ChargeControlKind.CHARGE_CONTROL_END_THRESHOLD,
-        )
-        val batteryGates = listOf(
-            ChargeControlKind.CHARGE_DISABLE,
-            ChargeControlKind.CHARGING_ENABLED,
-            ChargeControlKind.INPUT_SUSPEND,
-        ).map { battery to it }
-        val inputSupplyGates = access.supplyNames()
+        val supplyNames = access.supplyNames().filter { SUPPLY_NAME.matches(it) }
+        val batteryControlSupplies = supplyNames.filter {
+            it in INIT_BATTERY_SUPPLIES
+        }.sortedBy { INIT_BATTERY_SUPPLIES.indexOf(it) }
+        val thresholdCandidate = batteryControlSupplies.firstNotNullOfOrNull { supply ->
+            controlIfPresent(supply, ChargeControlKind.CHARGE_CONTROL_END_THRESHOLD)
+        }
+        val batteryGates = batteryControlSupplies.flatMap { supply ->
+            listOf(
+                ChargeControlKind.CHARGE_DISABLE,
+                ChargeControlKind.CHARGING_ENABLED,
+                ChargeControlKind.INPUT_SUSPEND,
+            ).map { supply to it }
+        }
+        val inputControlSupplies = supplyNames
             .asSequence()
-            .filter { it != battery && SUPPLY_NAME.matches(it) }
+            .filter {
+                it != battery && SUPPLY_NAME.matches(it) &&
+                    it in INIT_INPUT_SUPPLIES
+            }
+            .sortedBy { INIT_INPUT_SUPPLIES.indexOf(it) }
             .filter { name ->
                 access.read(name, PowerSupplyNode.TYPE)?.lowercase() in
                     setOf("usb", "mains", "wireless")
             }
-            .map { it to ChargeControlKind.INPUT_SUSPEND }
             .toList()
+        val inputSupplyGates = inputControlSupplies.map {
+            it to ChargeControlKind.INPUT_SUSPEND
+        }
         val gateCandidates = (batteryGates + inputSupplyGates)
             .mapNotNull { (supply, kind) -> controlIfPresent(supply, kind) }
-        val threshold = thresholdCandidate?.takeIf {
-            access.canWrite(it.supplyName, it.node)
-        }
-        val gate = gateCandidates.firstOrNull {
-            access.canWrite(it.supplyName, it.node)
-        }
-        // Detection is presence-based, not app-writability: the write goes through
-        // init (which owns the node), so `canWrite` from this process is always
-        // false and is the wrong signal. A node that reads a plausible µA value is
-        // taken as the control; CapabilityProbe further requires ROM mode plus a
-        // reachable bombd before reporting the capability SUPPORTED.
-        val currentLimitCandidates = currentLimitCandidates(battery)
-        val currentLimit = currentLimitCandidates.firstOrNull { ref ->
+        // Detection is presence-based, not app-writability: writes go through init
+        // (which owns the node), so `canWrite` from this process is always false and
+        // is the wrong signal. A node that reads a plausible value is taken as the
+        // control; CapabilityProbe further requires ROM mode plus a reachable bombd
+        // before reporting the capability SUPPORTED.
+        val currentLimitCandidates = currentLimitCandidates(
+            batterySupplies = batteryControlSupplies,
+            inputSupplies = inputControlSupplies,
+        )
+        val currentLimitCandidate = currentLimitCandidates.firstOrNull { ref ->
             readCurrentMicroamps(ref) != null
         }
-        val advertisedCurrent = currentLimit?.let { readCurrentMicroamps(it) }
+        val advertisedCurrent = currentLimitCandidate?.let { readCurrentMicroamps(it) }
+        val anyControlNodePresent = thresholdCandidate != null ||
+            gateCandidates.isNotEmpty() || currentLimitCandidate != null
+        val chargeControlAvailable = anyControlNodePresent && chargeWriter.available
+        val threshold = thresholdCandidate?.takeIf { chargeControlAvailable }
+        val gate = gateCandidates.firstOrNull()?.takeIf { chargeControlAvailable }
+        val currentLimit = currentLimitCandidate?.takeIf { chargeControlAvailable }
         return PowerSupplyCapabilities(
             telemetry = telemetry,
             capacityTelemetry = capacity,
@@ -255,18 +277,29 @@ class PowerSupplyBackend internal constructor(
     }
 
     /**
-     * Charge-current-limit candidates on the battery supply, in preference order:
-     * `constant_charge_current_max` (the CC-phase ceiling) then `input_current_limit`.
+     * Charge-current-limit candidates on fixed init-allowlisted battery/input
+     * supplies. Battery nodes prefer `constant_charge_current_max` (the CC-phase
+     * ceiling), then `input_current_limit`, then vendor fallback `current_max`;
+     * input supplies expose the latter two.
      *
-     * Deliberately limited to the battery supply and these two enum-owned node
-     * names — exactly the nodes the init trigger in bomb.rc writes. Detecting a node
-     * init does not write (e.g. an input supply's `input_current_limit`) would report
+     * The list exactly matches the fixed nodes the init trigger in bomb.rc writes.
+     * Detecting a node init does not write would report
      * the capability SUPPORTED while the write silently landed nowhere.
      */
-    private fun currentLimitCandidates(battery: String): List<CurrentLimitRef> = listOf(
-        CurrentLimitRef(battery, PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX),
-        CurrentLimitRef(battery, PowerSupplyNode.INPUT_CURRENT_LIMIT),
-    )
+    private fun currentLimitCandidates(
+        batterySupplies: List<String>,
+        inputSupplies: List<String>,
+    ): List<CurrentLimitRef> = buildList {
+        batterySupplies.forEach { supply ->
+            add(CurrentLimitRef(supply, PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX))
+            add(CurrentLimitRef(supply, PowerSupplyNode.INPUT_CURRENT_LIMIT))
+            add(CurrentLimitRef(supply, PowerSupplyNode.CURRENT_MAX))
+        }
+        inputSupplies.forEach { supply ->
+            add(CurrentLimitRef(supply, PowerSupplyNode.INPUT_CURRENT_LIMIT))
+            add(CurrentLimitRef(supply, PowerSupplyNode.CURRENT_MAX))
+        }
+    }
 
     private fun readCurrentMicroamps(ref: CurrentLimitRef): Int? =
         access.read(ref.supplyName, ref.node)?.toIntOrNull()
@@ -353,7 +386,7 @@ class PowerSupplyBackend internal constructor(
         if (limitPercent !in 50..100) return null
         val ref = capabilities().thresholdControl ?: return null
         val original = access.read(ref.supplyName, ref.node)?.toIntOrNull()?.toString() ?: return null
-        return if (writeAndVerify(ref, limitPercent.toString())) {
+        return if (writeControl(ref, limitPercent.toString())) {
             CapturedChargeControl(ref, original, limitPercent.toString())
         } else {
             null
@@ -363,7 +396,7 @@ class PowerSupplyBackend internal constructor(
     internal fun suspendCharging(): CapturedChargeControl? {
         val ref = capabilities().gateControl ?: return null
         val original = access.read(ref.supplyName, ref.node)?.toIntOrNull()?.toString() ?: return null
-        return if (writeAndVerify(ref, ref.suspendedValue)) {
+        return if (writeControl(ref, ref.suspendedValue)) {
             CapturedChargeControl(ref, original, ref.suspendedValue)
         } else {
             null
@@ -371,7 +404,7 @@ class PowerSupplyBackend internal constructor(
     }
 
     internal fun restore(captured: CapturedChargeControl): Boolean {
-        if (!controlStillAvailable(captured.ref)) return false
+        if (!controlStillProbed(captured.ref)) return false
         val current = access.read(captured.ref.supplyName, captured.ref.node)
             ?.toIntOrNull()
             ?.toString()
@@ -380,7 +413,7 @@ class PowerSupplyBackend internal constructor(
         // point Bomb no longer owns the node and must not overwrite the newer
         // controller state with its stale baseline.
         if (current != captured.appliedValue.toIntOrNull()?.toString()) return true
-        return writeAndVerify(captured.ref, captured.originalValue)
+        return writeControl(captured.ref, captured.originalValue)
     }
 
     internal fun reconcile(ref: ChargeControlRef, value: String): Boolean {
@@ -395,7 +428,7 @@ class PowerSupplyBackend internal constructor(
             ChargeControlKind.CHARGE_CONTROL_END_THRESHOLD -> number in 50..100
             else -> number in 0..1
         }
-        return valid && writeAndVerify(ref, number.toString())
+        return valid && writeControl(ref, number.toString())
     }
 
     /**
@@ -408,9 +441,12 @@ class PowerSupplyBackend internal constructor(
         if (microamps !in MIN_CURRENT_MICROAMPS..MAX_CURRENT_MICROAMPS) return null
         val ref = capabilities().currentLimitControl ?: return null
         val original = readCurrentMicroamps(ref) ?: return null
+        // This API is a ceiling, not an overclock request. Never raise the
+        // device/vendor-advertised limit observed when the profile is activated.
+        if (microamps > original) return null
         // The write is published through bombd; init performs the sysfs write. A
         // false here means bombd rejected or was unreachable.
-        return if (chargeCurrentWriter(microamps)) {
+        return if (chargeWriter.write(CURRENT_MAX_FIELD, microamps)) {
             CapturedCurrentLimit(ref, original, microamps)
         } else {
             null
@@ -423,13 +459,13 @@ class PowerSupplyBackend internal constructor(
         // A vendor charging daemon may have moved the cap since Bomb set it. If so
         // Bomb no longer owns the node and must not push its stale baseline back.
         if (current != captured.appliedMicroamps) return true
-        return chargeCurrentWriter(captured.originalMicroamps)
+        return chargeWriter.write(CURRENT_MAX_FIELD, captured.originalMicroamps)
     }
 
     /** Re-apply [captured] after a restart, if the node is still the probed one. */
     internal fun reconcileCurrentLimit(captured: CapturedCurrentLimit): Boolean {
         if (capabilities().currentLimitControl != captured.ref) return false
-        return chargeCurrentWriter(captured.appliedMicroamps)
+        return chargeWriter.write(CURRENT_MAX_FIELD, captured.appliedMicroamps)
     }
 
     private fun batterySupplyName(): String? {
@@ -461,7 +497,7 @@ class PowerSupplyBackend internal constructor(
         return ref.takeIf { valueIsValid }
     }
 
-    private fun controlStillAvailable(ref: ChargeControlRef): Boolean {
+    private fun controlStillProbed(ref: ChargeControlRef): Boolean {
         val caps = capabilities()
         val expected = if (ref.kind == ChargeControlKind.CHARGE_CONTROL_END_THRESHOLD) {
             caps.thresholdControl
@@ -469,15 +505,13 @@ class PowerSupplyBackend internal constructor(
             caps.gateControl
         }
         return expected == ref &&
-            access.canWrite(ref.supplyName, ref.node) &&
             access.read(ref.supplyName, ref.node)?.toIntOrNull() != null
     }
 
-    private fun writeAndVerify(ref: ChargeControlRef, value: String): Boolean {
-        if (!SAFE_CONTROL_VALUE.matches(value)) return false
-        if (!access.write(ref.supplyName, ref.node, value)) return false
-        return access.read(ref.supplyName, ref.node)?.toIntOrNull()?.toString() ==
-            value.toIntOrNull()?.toString()
+    /** Route a threshold/gate write through bombd; init owns the sysfs write. */
+    private fun writeControl(ref: ChargeControlRef, value: String): Boolean {
+        val number = value.toIntOrNull() ?: return false
+        return chargeWriter.write(ref.kind.field, number)
     }
 
     private fun readInt(supply: String, node: PowerSupplyNode, range: IntRange): Int? =
@@ -494,7 +528,11 @@ class PowerSupplyBackend internal constructor(
 
     private companion object {
         val SUPPLY_NAME = Regex("^[A-Za-z0-9_.-]{1,64}$")
-        val SAFE_CONTROL_VALUE = Regex("^-?[0-9]{1,12}$")
+        val INIT_BATTERY_SUPPLIES = listOf("battery", "bms")
+        val INIT_INPUT_SUPPLIES = listOf("usb", "ac", "mains", "wireless")
+
+        // The bombd/init request field for the charge-current cap.
+        const val CURRENT_MAX_FIELD = "current_max"
 
         // Charge-current node value bounds in µA (plausibility gate for the probe).
         const val MIN_CURRENT_MICROAMPS = 100_000

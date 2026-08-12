@@ -98,12 +98,44 @@ on property:persist.sys.bomb.memory.page_cluster=*
 # Charge-current cap, in microamps. BombCoreService + PowerSupplyBackend
 # range-validate the value and bombd publishes it as a bounded int; init owns the
 # actual sysfs write here. Non-existent paths fail harmlessly (as with the memcg
-# swappiness fan-out above). Both node names the backend probes — constant_charge_current_max
-# and input_current_limit — are written on the battery and bms supplies, so whichever
-# node the capability probe selected is the one init writes. Restoring the stock cap
-# is the same trigger with the captured original value; there is no separate clear path.
+# swappiness fan-out above). The fixed paths mirror the backend's supply/node
+# allowlist; whichever node the capability probe selected is the one init writes.
+# Restoring the stock cap uses this trigger with the captured original value.
 on property:persist.sys.bomb.charge.current_max=*
     write /sys/class/power_supply/battery/constant_charge_current_max ${persist.sys.bomb.charge.current_max}
     write /sys/class/power_supply/bms/constant_charge_current_max ${persist.sys.bomb.charge.current_max}
     write /sys/class/power_supply/battery/input_current_limit ${persist.sys.bomb.charge.current_max}
     write /sys/class/power_supply/bms/input_current_limit ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/battery/current_max ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/bms/current_max ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/usb/input_current_limit ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/usb/current_max ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/ac/input_current_limit ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/ac/current_max ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/mains/input_current_limit ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/mains/current_max ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/wireless/input_current_limit ${persist.sys.bomb.charge.current_max}
+    write /sys/class/power_supply/wireless/current_max ${persist.sys.bomb.charge.current_max}
+
+# Capacity threshold and charging gates use the same bounded bombd -> property ->
+# init path as the current cap. Fan-out is intentionally limited to fixed,
+# allowlisted power-supply names; Bomb never accepts a caller-provided sysfs path.
+on property:persist.sys.bomb.charge.end_threshold=*
+    write /sys/class/power_supply/battery/charge_control_end_threshold ${persist.sys.bomb.charge.end_threshold}
+    write /sys/class/power_supply/bms/charge_control_end_threshold ${persist.sys.bomb.charge.end_threshold}
+
+on property:persist.sys.bomb.charge.disable=*
+    write /sys/class/power_supply/battery/charge_disable ${persist.sys.bomb.charge.disable}
+    write /sys/class/power_supply/bms/charge_disable ${persist.sys.bomb.charge.disable}
+
+on property:persist.sys.bomb.charge.charging_enabled=*
+    write /sys/class/power_supply/battery/charging_enabled ${persist.sys.bomb.charge.charging_enabled}
+    write /sys/class/power_supply/bms/charging_enabled ${persist.sys.bomb.charge.charging_enabled}
+
+on property:persist.sys.bomb.charge.input_suspend=*
+    write /sys/class/power_supply/battery/input_suspend ${persist.sys.bomb.charge.input_suspend}
+    write /sys/class/power_supply/bms/input_suspend ${persist.sys.bomb.charge.input_suspend}
+    write /sys/class/power_supply/usb/input_suspend ${persist.sys.bomb.charge.input_suspend}
+    write /sys/class/power_supply/ac/input_suspend ${persist.sys.bomb.charge.input_suspend}
+    write /sys/class/power_supply/mains/input_suspend ${persist.sys.bomb.charge.input_suspend}
+    write /sys/class/power_supply/wireless/input_suspend ${persist.sys.bomb.charge.input_suspend}

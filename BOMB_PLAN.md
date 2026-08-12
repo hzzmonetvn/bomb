@@ -27,7 +27,9 @@ The project should provide one coherent backend for:
 - Battery Lab;
 - HyperIsland / Live Updates bridging;
 - call recording where the platform/vendor audio stack supports it;
-- automation via Bomb Rules.
+- automation via Bomb Rules;
+- privileged app update fallback & System/PrivApp status preservation (§45);
+- UI layout alignment polish & list performance optimization (§46).
 
 Core architectural principle:
 
@@ -3009,5 +3011,28 @@ Task Manager
 + Bomb Rules
 + Bomb Bridge
 ```
+
+---
+
+# 45. Privileged App Update & System Status Preservation
+
+When Bomb is installed in `/system/priv-app` or `/product/priv-app` and later updated via sideload/OTA (`/data/app` update):
+
+1. **Privileged Status Detection (`RuntimeModeDetector` & `CapabilityProbe`):**
+   - Ensure Package Manager flags (`FLAG_SYSTEM` or `PRIVATE_FLAG_PRIVILEGED`) are correctly evaluated even after an update to `/data/app`.
+   - Protect signature permission checks so updated APKs retaining the original system certificate do not lose privileged IPC capabilities or get demoted to `NORMAL` mode.
+2. **System XML Whitelist Validation:**
+   - Verify `/system/etc/permissions/privapp-permissions-com.hzzmonet.zkbomb.xml` remains respected during runtime permission checks.
+
+---
+
+# 46. UI Alignment Polish & List Virtualization Optimization
+
+1. **App Selector List Lag Fix:**
+   - Optimize Compose `LazyColumn` keying and item rendering for application selection lists (`AppsScreen`, `AppVisibilityScreen`, `FirewallScreen`).
+   - Use `derivedStateOf`, async icon fetching (`rememberDrawablePainter` / bitmap cache), and payload-based recomposition to prevent UI stutters when scrolling 200+ installed packages.
+2. **MIUIX Layout Alignment Polish:**
+   - Fix card padding inconsistencies, title clipping, and slider alignment issues on specific DPI screens.
+
 
 Research is mandatory before implementation. Reference projects exist to teach architecture and edge cases, not to be copied blindly.

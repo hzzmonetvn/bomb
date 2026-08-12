@@ -27,6 +27,21 @@ class BatteryLabPolicyTest {
                 BatteryLabProfile(maxTemperatureDeciCelsius = 560),
             ).isNotEmpty(),
         )
+        assertTrue(
+            BatteryLabProfileValidator.violations(
+                BatteryLabProfile(maxChargeCurrentMicroamps = 99_999),
+            ).isNotEmpty(),
+        )
+        assertTrue(
+            BatteryLabProfileValidator.violations(
+                BatteryLabProfile(maxChargeCurrentMicroamps = 20_000_001),
+            ).isNotEmpty(),
+        )
+        assertTrue(
+            BatteryLabProfileValidator.violations(
+                BatteryLabProfile(maxChargeCurrentMicroamps = 1_500_000),
+            ).isEmpty(),
+        )
         assertTrue(BatteryLabProfileValidator.violations(profile).isEmpty())
     }
 

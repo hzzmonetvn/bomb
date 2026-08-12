@@ -40,7 +40,11 @@ class CapabilityProbe(
 
     fun probe(): BombCapabilities {
         val builder = BombCapabilities.Builder()
-        val romMode = mode.romDeclared()
+        // detect() also recognises a platform priv-app whose active APK moved to
+        // /data/app after an update. Capabilities still probe their real operation;
+        // this only prevents the installation identity from being demoted.
+        val integratedMode = mode.detect() == BombRuntimeMode.ROM
+        val controlPlaneAvailable = integratedMode && controlWriter.available
 
         // ---- Task Manager and telemetry --------------------------------------
         // Measured, not inferred. Android mounts /proc with hidepid so an
@@ -54,7 +58,7 @@ class CapabilityProbe(
             // did not include the mount change. Reported as unsupported rather
             // than requires-root, because root would not help either — it is a
             // property of how /proc was mounted at boot.
-            romMode -> CapabilityState.UNSUPPORTED
+            integratedMode -> CapabilityState.UNSUPPORTED
             else -> CapabilityState.REQUIRES_ROOT
         }
         builder.set(BombCapability.TASK_MANAGER, processState)
@@ -132,11 +136,11 @@ class CapabilityProbe(
         // so no amount of app-side privilege reaches them.
         builder.set(
             BombCapability.PACKAGE_VISIBILITY_VIRTUALIZATION,
-            frameworkPatchState(romMode, "ro.bomb.framework.visibility"),
+            frameworkPatchState(integratedMode, "ro.bomb.framework.visibility"),
         )
         builder.set(
             BombCapability.SETTINGS_VIRTUALIZATION,
-            frameworkPatchState(romMode, "ro.bomb.framework.settings"),
+            frameworkPatchState(integratedMode, "ro.bomb.framework.settings"),
         )
 
         // ---- Network ----------------------------------------------------------
@@ -151,7 +155,7 @@ class CapabilityProbe(
             BombCapability.ZRAM_CONTROL,
             when {
                 !zramCaps.present -> CapabilityState.UNSUPPORTED
-                romMode && controlWriter.available -> CapabilityState.SUPPORTED
+                controlPlaneAvailable -> CapabilityState.SUPPORTED
                 else -> CapabilityState.REQUIRES_ROOT
             },
         )
@@ -182,43 +186,40 @@ class CapabilityProbe(
         val powerSupplyCapabilities = powerSupply.capabilities()
         builder.set(
             BombCapability.CHARGE_CONTROL,
-            when {
-                powerSupplyCapabilities.anyChargeControl -> CapabilityState.SUPPORTED
-                powerSupplyCapabilities.thresholdNodePresent ||
-                    powerSupplyCapabilities.gateNodePresent -> CapabilityState.REQUIRES_ROOT
-                else -> CapabilityState.UNSUPPORTED
-            },
+            chargeControlCapabilityState(
+                functionalControl = powerSupplyCapabilities.anyChargeControl,
+                nodePresent = powerSupplyCapabilities.thresholdNodePresent ||
+                    powerSupplyCapabilities.gateNodePresent ||
+                    powerSupplyCapabilities.currentLimitNodePresent,
+                controlPlaneAvailable = controlPlaneAvailable,
+            ),
         )
         builder.set(
             BombCapability.CHARGE_LIMIT_CONTROL,
-            when {
-                powerSupplyCapabilities.chargeLimitControl -> CapabilityState.SUPPORTED
-                powerSupplyCapabilities.capacityTelemetry &&
+            chargeControlCapabilityState(
+                functionalControl = powerSupplyCapabilities.chargeLimitControl,
+                nodePresent = powerSupplyCapabilities.capacityTelemetry &&
                     (powerSupplyCapabilities.thresholdNodePresent ||
-                        powerSupplyCapabilities.gateNodePresent) -> CapabilityState.REQUIRES_ROOT
-                else -> CapabilityState.UNSUPPORTED
-            },
+                        powerSupplyCapabilities.gateNodePresent),
+                controlPlaneAvailable = controlPlaneAvailable,
+            ),
         )
         builder.set(
             BombCapability.THERMAL_CHARGE_CONTROL,
-            when {
-                powerSupplyCapabilities.thermalChargeControl -> CapabilityState.SUPPORTED
-                powerSupplyCapabilities.temperatureTelemetry &&
-                    powerSupplyCapabilities.gateNodePresent -> CapabilityState.REQUIRES_ROOT
-                else -> CapabilityState.UNSUPPORTED
-            },
+            chargeControlCapabilityState(
+                functionalControl = powerSupplyCapabilities.thermalChargeControl,
+                nodePresent = powerSupplyCapabilities.temperatureTelemetry &&
+                    powerSupplyCapabilities.gateNodePresent,
+                controlPlaneAvailable = controlPlaneAvailable,
+            ),
         )
         builder.set(
             BombCapability.CHARGE_CURRENT_CONTROL,
-            when {
-                // The write is routed through bombd + the init trigger, so the node
-                // being present is not enough — the control plane must be reachable
-                // in ROM mode, exactly as ZRAM_CONTROL requires.
-                powerSupplyCapabilities.currentLimitNodePresent &&
-                    romMode && controlWriter.available -> CapabilityState.SUPPORTED
-                powerSupplyCapabilities.currentLimitNodePresent -> CapabilityState.REQUIRES_ROOT
-                else -> CapabilityState.UNSUPPORTED
-            },
+            chargeControlCapabilityState(
+                functionalControl = powerSupplyCapabilities.chargeCurrentControl,
+                nodePresent = powerSupplyCapabilities.currentLimitNodePresent,
+                controlPlaneAvailable = controlPlaneAvailable,
+            ),
         )
         builder.set(
             BombCapability.AUTOMATION_RULES,
@@ -237,14 +238,14 @@ class CapabilityProbe(
                 // A ROM that declares Bomb integrated ships the init trigger the
                 // REDUCED tier is driven by; that trigger is part of the same
                 // integration the flag asserts.
-                romMode && controlWriter.available -> CapabilityState.SUPPORTED
+                controlPlaneAvailable -> CapabilityState.SUPPORTED
                 else -> CapabilityState.REQUIRES_ROOT
             },
         )
         builder.set(
             BombCapability.LOG_DISABLE,
             when {
-                romMode && controlWriter.available -> CapabilityState.SUPPORTED
+                controlPlaneAvailable -> CapabilityState.SUPPORTED
                 else -> CapabilityState.REQUIRES_ROOT
             },
         )
@@ -339,6 +340,16 @@ internal fun frequencyCapabilityState(
     !backendProbed -> CapabilityState.NOT_PROBED
     writable -> CapabilityState.SUPPORTED
     present -> CapabilityState.REQUIRES_ROOT
+    else -> CapabilityState.UNSUPPORTED
+}
+
+internal fun chargeControlCapabilityState(
+    functionalControl: Boolean,
+    nodePresent: Boolean,
+    controlPlaneAvailable: Boolean,
+): CapabilityState = when {
+    functionalControl && controlPlaneAvailable -> CapabilityState.SUPPORTED
+    nodePresent -> CapabilityState.REQUIRES_ROOT
     else -> CapabilityState.UNSUPPORTED
 }
 

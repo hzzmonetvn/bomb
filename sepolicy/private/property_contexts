@@ -3,6 +3,10 @@ persist.sys.bomb.log.audit_rate    u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.memory.swappiness u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.memory.page_cluster u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.charge.current_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.charge.end_threshold u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.charge.disable u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.charge.charging_enabled u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.charge.input_suspend u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.log.level         u:object_r:bomb_status_prop:s0 exact enum default reduced off
 persist.sys.bomb.selinux_bringup   u:object_r:bomb_status_prop:s0 exact bool
 persist.sys.zk.bomb                u:object_r:bomb_status_prop:s0 exact bool

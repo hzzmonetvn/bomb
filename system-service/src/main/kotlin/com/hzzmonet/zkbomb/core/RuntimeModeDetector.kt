@@ -2,6 +2,7 @@ package com.hzzmonet.zkbomb.core
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.os.Process
 import com.hzzmonet.zkbomb.api.BombRuntimeMode
 import java.io.File
@@ -29,19 +30,24 @@ class RuntimeModeDetector(
     private val root: File = File("/"),
 ) {
 
-    fun detect(): BombRuntimeMode {
-        if (romDeclared()) return BombRuntimeMode.ROM
-        if (rootBackendPresent()) return BombRuntimeMode.ROOT
-        return BombRuntimeMode.NORMAL
-    }
+    /**
+     * An updated priv-app keeps its system identity even though its active APK
+     * moves to `/data/app`; that measured identity prevents a sideload update
+     * from demoting the integrated backend to NORMAL.
+     */
+    fun detect(): BombRuntimeMode = classifyRuntimeMode(
+        romDeclared = romDeclared(),
+        privilegedInstall = privAppPlacement(),
+        rootBackendPresent = rootBackendPresent(),
+    )
 
     /**
      * The ROM set the marker to exactly `"1"`.
      *
      * Note this is checked even when properties are otherwise unreadable through
      * reflection — [SystemPropertyReader] reports that honestly, and a device
-     * where the marker cannot be read is reported as NORMAL rather than as ROM,
-     * which is the safe direction: it under-claims.
+     * where the marker cannot be read can still be identified from PackageManager's
+     * preserved privileged-system identity; otherwise it under-claims.
      */
     fun romDeclared(): Boolean =
         properties.get(BombRuntimeMode.ROM_MARKER_PROPERTY) == BombRuntimeMode.ROM_MARKER_VALUE ||
@@ -76,16 +82,19 @@ class RuntimeModeDetector(
      *     private flag — which PackageManager preserves across the `/data/app`
      *     update.
      *
-     * Reflection reads the hidden `privateFlags`; if the field or value cannot be
-     * read the answer is false, i.e. it under-claims, which is the safe direction.
+     * Reflection reads the hidden `privateFlags`. If hidden-API access is blocked,
+     * a real grant from Bomb's privapp XML is accepted as equivalent evidence,
+     * but only together with the system/updated-system PackageManager flag.
      */
     fun privAppPlacement(): Boolean {
         val info = context.applicationInfo
-        if (info.sourceDir?.contains("/priv-app/") == true) return true
-        if (info.publicSourceDir?.contains("/priv-app/") == true) return true
-        val systemApp = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
-            (info.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-        return systemApp && hasPrivilegedPrivateFlag(info)
+        return isPrivilegedInstall(
+            sourceDir = info.sourceDir,
+            publicSourceDir = info.publicSourceDir,
+            applicationFlags = info.flags,
+            privateFlags = privateFlags(info),
+            allowlistedPermissionGranted = hasPrivilegedAllowlistGrant(),
+        )
     }
 
     /**
@@ -93,13 +102,16 @@ class RuntimeModeDetector(
      *
      * PackageManager sets this for apps in a `priv-app` directory and keeps it set
      * when such an app is updated to `/data/app`, so it survives exactly the case
-     * the APK path loses. A missing field or read failure yields false — Bomb
-     * under-claims privilege rather than asserting it without evidence.
+     * the APK path loses. A missing field falls back to the measured privapp grant.
      */
-    private fun hasPrivilegedPrivateFlag(info: ApplicationInfo): Boolean = runCatching {
-        val privateFlags = ApplicationInfo::class.java.getField("privateFlags").getInt(info)
-        (privateFlags and PRIVATE_FLAG_PRIVILEGED) != 0
-    }.getOrDefault(false)
+    private fun privateFlags(info: ApplicationInfo): Int? = runCatching {
+        ApplicationInfo::class.java.getField("privateFlags").getInt(info)
+    }.getOrNull()
+
+    /** A runtime check of grants originating from Bomb's partition-matched privapp XML. */
+    private fun hasPrivilegedAllowlistGrant(): Boolean = PRIVILEGED_ALLOWLIST_PERMISSIONS.any {
+        context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+    }
 
     /**
      * Whether this process can see other processes in `/proc`.
@@ -121,8 +133,42 @@ class RuntimeModeDetector(
 
     private companion object {
         const val VISIBLE_PROCESS_THRESHOLD = 3
-
-        // ApplicationInfo.PRIVATE_FLAG_PRIVILEGED is @hide but stable: 1 shl 3.
-        const val PRIVATE_FLAG_PRIVILEGED = 1 shl 3
+        val PRIVILEGED_ALLOWLIST_PERMISSIONS = listOf(
+            "android.permission.FORCE_STOP_PACKAGES",
+            "android.permission.SUSPEND_APPS",
+            "android.permission.CHANGE_COMPONENT_ENABLED_STATE",
+            "android.permission.REAL_GET_TASKS",
+            "android.permission.CAPTURE_AUDIO_OUTPUT",
+        )
     }
+}
+
+/** Pure classifier kept outside Android objects so updated-system edge cases are unit-testable. */
+internal fun isPrivilegedInstall(
+    sourceDir: String?,
+    publicSourceDir: String?,
+    applicationFlags: Int,
+    privateFlags: Int?,
+    allowlistedPermissionGranted: Boolean = false,
+): Boolean {
+    if (sourceDir?.contains("/priv-app/") == true) return true
+    if (publicSourceDir?.contains("/priv-app/") == true) return true
+    val systemIdentity = applicationFlags and ApplicationInfo.FLAG_SYSTEM != 0 ||
+        applicationFlags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0
+    val privilegedPrivateFlag = privateFlags != null &&
+        privateFlags and PRIVATE_FLAG_PRIVILEGED != 0
+    return systemIdentity && (privilegedPrivateFlag || allowlistedPermissionGranted)
+}
+
+// ApplicationInfo.PRIVATE_FLAG_PRIVILEGED is @hide but stable: 1 shl 3.
+internal const val PRIVATE_FLAG_PRIVILEGED = 1 shl 3
+
+internal fun classifyRuntimeMode(
+    romDeclared: Boolean,
+    privilegedInstall: Boolean,
+    rootBackendPresent: Boolean,
+): BombRuntimeMode = when {
+    romDeclared || privilegedInstall -> BombRuntimeMode.ROM
+    rootBackendPresent -> BombRuntimeMode.ROOT
+    else -> BombRuntimeMode.NORMAL
 }

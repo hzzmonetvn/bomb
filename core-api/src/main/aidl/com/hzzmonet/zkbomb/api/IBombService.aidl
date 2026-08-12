@@ -384,4 +384,10 @@ interface IBombService {
 
     /** Applies only min/max points advertised by the matching fresh target snapshot. */
     BombResult setFrequencyLimits(in FrequencyLimitRequestParcel request);
+
+    // ---- Contract version 13 — Battery Lab charge-current schema ----------
+    // No transaction is inserted here: v13 extends the existing v9
+    // BatteryLabProfileParcel/BatteryLabSnapshot tail with nullable/defaulted
+    // microamp current-limit fields. setBatteryLabProfile remains the single
+    // atomic profile operation, preserving capture/rollback/restore semantics.
 }

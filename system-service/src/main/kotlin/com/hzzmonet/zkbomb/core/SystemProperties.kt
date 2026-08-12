@@ -81,15 +81,24 @@ class RomControlPropertyWriter(
     }
 
     /**
-     * Publish a charge-current cap in microamps. The APK never writes the sysfs
-     * node; bombd range-checks and sets the request property, and init performs the
-     * write via the `persist.sys.bomb.charge.current_max` trigger. Bounds mirror the
-     * bombd handler and the domain BatteryLabProfileValidator.
+     * Publish one charge-control write. The APK never writes the sysfs node; bombd
+     * range-checks and sets the matching `persist.sys.bomb.charge.*` request
+     * property, and init performs the write via its bomb.rc trigger. [field] is one
+     * of the bounded control fields; bounds mirror the bombd handler:
+     *  - `current_max`: 100000..20000000 µA
+     *  - `end_threshold`: 0..100 percent
+     *  - `disable` / `charging_enabled` / `input_suspend`: 0 or 1
      */
-    fun requestChargeCurrentMax(microamps: Int): Boolean {
-        if (microamps !in 100_000..20_000_000) return false
-        return client.request("CHARGE current_max $microamps")
+    fun requestChargeControl(field: String, value: Int): Boolean {
+        return isValidChargeControl(field, value) && client.request("CHARGE $field $value")
     }
+}
+
+internal fun isValidChargeControl(field: String, value: Int): Boolean = when (field) {
+    "current_max" -> value in 100_000..20_000_000
+    "end_threshold" -> value in 0..100
+    "disable", "charging_enabled", "input_suspend" -> value in 0..1
+    else -> false
 }
 
 /** Client for the fixed, line-oriented bombd protocol. */
@@ -119,7 +128,8 @@ class BombdClient {
         val VALID_COMMAND = Regex(
             "^(PING|LOG (default|reduced|off) (-1|[0-9]{1,4})|" +
                 "MEM (swappiness|page_cluster) [0-9]{1,3}|" +
-                "CHARGE current_max [0-9]{1,8})$",
+                "CHARGE (current_max [0-9]{1,8}|end_threshold [0-9]{1,3}|" +
+                "(disable|charging_enabled|input_suspend) [01]))$",
         )
     }
 }

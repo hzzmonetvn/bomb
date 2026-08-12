@@ -16,15 +16,15 @@ enum class BombRuntimeMode {
     NORMAL,
 
     /**
-     * The ROM declares it integrated Bomb, via `ro.bomb.integrated=1`.
+     * The ROM declares it integrated Bomb, via `ro.bomb.integrated=1`, or
+     * PackageManager reports Bomb as the preserved privileged system app after
+     * its active APK is updated into `/data/app`.
      *
      * The property is a claim by the image builder — the only party who knows
-     * whether priv-app placement, the permission allowlist and the SELinux
-     * policy were actually applied, since none of that is visible from inside
-     * the app. It is trusted for **what mode to report**, and for nothing else:
-     * each capability is still probed, so a device where the property is set but
-     * the integration is incomplete reports the missing pieces rather than
-     * claiming them.
+     * The property and PackageManager identity are trusted for **what mode to
+     * report**, and for nothing else. Permission grants, bombd reachability and
+     * each operation remain capability-probed, so an incomplete privapp XML or
+     * SELinux integration cannot turn a control green merely from placement.
      */
     ROM,
 
