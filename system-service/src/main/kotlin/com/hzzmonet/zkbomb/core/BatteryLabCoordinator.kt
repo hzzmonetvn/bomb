@@ -14,6 +14,7 @@ internal data class BatteryLabRuntimeState(
     val profile: BatteryLabProfile,
     val thresholdCapture: CapturedChargeControl? = null,
     val gateCapture: CapturedChargeControl? = null,
+    val currentLimitCapture: CapturedCurrentLimit? = null,
     val lastDecisionReason: ChargeGuardReason? = null,
 )
 
@@ -33,12 +34,14 @@ internal class SharedPreferencesBatteryLabStateStore(context: Context) : Battery
             capacityResumeHysteresisPercent = preferences.getInt(KEY_CAPACITY_HYSTERESIS, 5),
             temperatureResumeHysteresisDeciCelsius =
             preferences.getInt(KEY_TEMPERATURE_HYSTERESIS, 30),
+            maxChargeCurrentMicroamps = nullableInt(KEY_CURRENT_LIMIT),
         )
         if (BatteryLabProfileValidator.violations(profile).isNotEmpty()) return null
         return BatteryLabRuntimeState(
             profile = profile,
             thresholdCapture = readCapture(PREFIX_THRESHOLD, threshold = true),
             gateCapture = readCapture(PREFIX_GATE, threshold = false),
+            currentLimitCapture = readCurrentCapture(),
             lastDecisionReason = preferences.getString(KEY_LAST_REASON, null)?.let { name ->
                 ChargeGuardReason.entries.firstOrNull { it.name == name }
             },
@@ -61,8 +64,10 @@ internal class SharedPreferencesBatteryLabStateStore(context: Context) : Battery
                     KEY_TEMPERATURE_HYSTERESIS,
                     state.profile.temperatureResumeHysteresisDeciCelsius,
                 )
+                state.profile.maxChargeCurrentMicroamps?.let { putInt(KEY_CURRENT_LIMIT, it) }
                 writeCapture(PREFIX_THRESHOLD, state.thresholdCapture)
                 writeCapture(PREFIX_GATE, state.gateCapture)
+                writeCurrentCapture(state.currentLimitCapture)
                 state.lastDecisionReason?.let { putString(KEY_LAST_REASON, it.name) }
             }
             apply()
@@ -102,6 +107,26 @@ internal class SharedPreferencesBatteryLabStateStore(context: Context) : Battery
         putString("${prefix}_applied", capture.appliedValue)
     }
 
+    private fun readCurrentCapture(): CapturedCurrentLimit? {
+        val supply = preferences.getString("${PREFIX_CURRENT}_supply", null) ?: return null
+        if (!SUPPLY_NAME.matches(supply)) return null
+        val nodeName = preferences.getString("${PREFIX_CURRENT}_node", null) ?: return null
+        val node = CURRENT_NODES.firstOrNull { it.name == nodeName } ?: return null
+        val original = preferences.getInt("${PREFIX_CURRENT}_original", -1).takeIf { it > 0 } ?: return null
+        val applied = preferences.getInt("${PREFIX_CURRENT}_applied", -1).takeIf { it > 0 } ?: return null
+        return CapturedCurrentLimit(CurrentLimitRef(supply, node), original, applied)
+    }
+
+    private fun android.content.SharedPreferences.Editor.writeCurrentCapture(
+        capture: CapturedCurrentLimit?,
+    ) {
+        if (capture == null) return
+        putString("${PREFIX_CURRENT}_supply", capture.ref.supplyName)
+        putString("${PREFIX_CURRENT}_node", capture.ref.node.name)
+        putInt("${PREFIX_CURRENT}_original", capture.originalMicroamps)
+        putInt("${PREFIX_CURRENT}_applied", capture.appliedMicroamps)
+    }
+
     private companion object {
         const val PREFERENCES_NAME = "bomb_battery_lab"
         const val KEY_ENABLED = "enabled"
@@ -109,11 +134,17 @@ internal class SharedPreferencesBatteryLabStateStore(context: Context) : Battery
         const val KEY_TEMPERATURE_LIMIT = "temperature_limit"
         const val KEY_CAPACITY_HYSTERESIS = "capacity_hysteresis"
         const val KEY_TEMPERATURE_HYSTERESIS = "temperature_hysteresis"
+        const val KEY_CURRENT_LIMIT = "current_limit"
         const val KEY_LAST_REASON = "last_reason"
         const val PREFIX_THRESHOLD = "threshold"
         const val PREFIX_GATE = "gate"
+        const val PREFIX_CURRENT = "current"
         val SUPPLY_NAME = Regex("^[A-Za-z0-9_.-]{1,64}$")
         val CONTROL_VALUE = Regex("^-?[0-9]{1,12}$")
+        val CURRENT_NODES = listOf(
+            PowerSupplyNode.CONSTANT_CHARGE_CURRENT_MAX,
+            PowerSupplyNode.INPUT_CURRENT_LIMIT,
+        )
     }
 }
 
@@ -133,6 +164,7 @@ internal class BatteryLabCoordinator(
         activeProfile = state?.profile,
         suspendedByBomb = state?.gateCapture != null,
         lastDecisionReason = state?.lastDecisionReason?.name,
+        advertisedCurrentCeilingMicroamps = state?.currentLimitCapture?.originalMicroamps,
     )
 
     @Synchronized
@@ -147,6 +179,9 @@ internal class BatteryLabCoordinator(
         if (profile.maxTemperatureDeciCelsius != null && !caps.thermalChargeControl) {
             return BombResult.unsupported("Temperature or writable charging-gate node unavailable")
         }
+        if (profile.maxChargeCurrentMicroamps != null && !caps.chargeCurrentControl) {
+            return BombResult.unsupported("No writable charge-current-limit node")
+        }
         clearInternal(removeProfile = true).takeUnless { it.isSuccess }?.let { return it }
 
         var next = BatteryLabRuntimeState(profile)
@@ -155,6 +190,17 @@ internal class BatteryLabCoordinator(
             val captured = backend.setThreshold(limit)
                 ?: return BombResult.backendUnavailable("Charge threshold write was not acknowledged")
             next = next.copy(thresholdCapture = captured)
+        }
+        val currentLimit = profile.maxChargeCurrentMicroamps
+        if (currentLimit != null && caps.currentLimitControl != null) {
+            val captured = backend.setCurrentLimit(currentLimit)
+            if (captured == null) {
+                // Undo a threshold that may have just landed, so a failed activation
+                // never leaves an untracked write on the device.
+                next.thresholdCapture?.let { backend.restore(it) }
+                return BombResult.backendUnavailable("Charge-current write was not acknowledged")
+            }
+            next = next.copy(currentLimitCapture = captured)
         }
         state = next
         store.save(next)
@@ -242,6 +288,11 @@ internal class BatteryLabCoordinator(
                 return BombResult.backendUnavailable("Charging gate could not be reconciled")
             }
         }
+        state?.currentLimitCapture?.let { capture ->
+            if (!backend.reconcileCurrentLimit(capture)) {
+                return BombResult.backendUnavailable("Charge-current limit could not be reconciled")
+            }
+        }
         return evaluate()
     }
 
@@ -267,10 +318,18 @@ internal class BatteryLabCoordinator(
                 return BombResult.failed("Could not restore the previous charge threshold")
             }
         }
+        current.currentLimitCapture?.let {
+            if (!backend.restoreCurrentLimit(it)) {
+                val partiallyRestored = current.copy(gateCapture = null, thresholdCapture = null)
+                state = partiallyRestored
+                store.save(partiallyRestored)
+                return BombResult.failed("Could not restore the previous charge-current value")
+            }
+        }
         state = if (removeProfile) {
             null
         } else {
-            current.copy(thresholdCapture = null, gateCapture = null)
+            current.copy(thresholdCapture = null, gateCapture = null, currentLimitCapture = null)
         }
         store.save(state)
         return BombResult.success()

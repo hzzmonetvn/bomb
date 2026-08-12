@@ -1,6 +1,7 @@
 package com.hzzmonet.zkbomb.core
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Process
 import com.hzzmonet.zkbomb.api.BombRuntimeMode
 import java.io.File
@@ -58,15 +59,47 @@ class RuntimeModeDetector(
         File(root, "data/adb/modules/bomb_backend").isDirectory
 
     /**
-     * Whether Bomb is placed in a priv-app directory.
+     * Whether Bomb is installed as a privileged app.
      *
-     * Derived from the APK path, which is how `PackageManagerService` decides.
-     * Reported alongside the mode because the two can disagree — a ROM that sets
-     * the marker but ships the APK to the wrong partition is a real mistake, and
-     * one that is otherwise very hard to see.
+     * The naive check is the APK path — `PackageManagerService` decides priv-app
+     * status from where the base APK lives. But that alone is wrong for an
+     * **updated** system app: once a priv-app baked into `/system/priv-app` is
+     * updated through `/data/app`, its active `sourceDir` points at `/data/app`,
+     * even though PackageManager keeps it a system app and preserves its
+     * privileged private flag. Deciding on `sourceDir` alone would then demote a
+     * still-privileged install to "sideloaded".
+     *
+     * So the check is layered:
+     *  1. the active or public APK path is under `/priv-app/` (a clean priv-app
+     *     with no update), or
+     *  2. the app is a system / updated-system app **and** carries the privileged
+     *     private flag — which PackageManager preserves across the `/data/app`
+     *     update.
+     *
+     * Reflection reads the hidden `privateFlags`; if the field or value cannot be
+     * read the answer is false, i.e. it under-claims, which is the safe direction.
      */
-    fun privAppPlacement(): Boolean =
-        context.applicationInfo.sourceDir?.contains("/priv-app/") == true
+    fun privAppPlacement(): Boolean {
+        val info = context.applicationInfo
+        if (info.sourceDir?.contains("/priv-app/") == true) return true
+        if (info.publicSourceDir?.contains("/priv-app/") == true) return true
+        val systemApp = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+            (info.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+        return systemApp && hasPrivilegedPrivateFlag(info)
+    }
+
+    /**
+     * The hidden `ApplicationInfo.PRIVATE_FLAG_PRIVILEGED`, read reflectively.
+     *
+     * PackageManager sets this for apps in a `priv-app` directory and keeps it set
+     * when such an app is updated to `/data/app`, so it survives exactly the case
+     * the APK path loses. A missing field or read failure yields false — Bomb
+     * under-claims privilege rather than asserting it without evidence.
+     */
+    private fun hasPrivilegedPrivateFlag(info: ApplicationInfo): Boolean = runCatching {
+        val privateFlags = ApplicationInfo::class.java.getField("privateFlags").getInt(info)
+        (privateFlags and PRIVATE_FLAG_PRIVILEGED) != 0
+    }.getOrDefault(false)
 
     /**
      * Whether this process can see other processes in `/proc`.
@@ -88,5 +121,8 @@ class RuntimeModeDetector(
 
     private companion object {
         const val VISIBLE_PROCESS_THRESHOLD = 3
+
+        // ApplicationInfo.PRIVATE_FLAG_PRIVILEGED is @hide but stable: 1 shl 3.
+        const val PRIVATE_FLAG_PRIVILEGED = 1 shl 3
     }
 }

@@ -56,6 +56,8 @@ enum class BombCapability {
     CHARGE_LIMIT_CONTROL,
     /** Battery temperature telemetry plus an allowlisted writable charging gate. */
     THERMAL_CHARGE_CONTROL,
+    /** An allowlisted writable charge-current-limit node (constant_charge_current_max / input_current_limit). */
+    CHARGE_CURRENT_CONTROL,
     ZRAM_CONTROL,
     /** Bomb Rules orchestration and its app/screen event source. */
     AUTOMATION_RULES,

@@ -12,6 +12,8 @@ data class BatteryLabProfileParcel(
     val maxTemperatureDeciCelsius: Int?,
     val capacityResumeHysteresisPercent: Int = 5,
     val temperatureResumeHysteresisDeciCelsius: Int = 30,
+    /** Charge-current cap in microamps, or null to leave current uncapped. */
+    val maxChargeCurrentMicroamps: Int? = null,
 ) : Parcelable {
     fun toDomain(): BatteryLabProfile? {
         val profile = BatteryLabProfile(
@@ -19,6 +21,7 @@ data class BatteryLabProfileParcel(
             maxTemperatureDeciCelsius = maxTemperatureDeciCelsius,
             capacityResumeHysteresisPercent = capacityResumeHysteresisPercent,
             temperatureResumeHysteresisDeciCelsius = temperatureResumeHysteresisDeciCelsius,
+            maxChargeCurrentMicroamps = maxChargeCurrentMicroamps,
         )
         return profile.takeIf { BatteryLabProfileValidator.violations(it).isEmpty() }
     }
@@ -31,6 +34,7 @@ data class BatteryLabProfileParcel(
                 capacityResumeHysteresisPercent = profile.capacityResumeHysteresisPercent,
                 temperatureResumeHysteresisDeciCelsius =
                 profile.temperatureResumeHysteresisDeciCelsius,
+                maxChargeCurrentMicroamps = profile.maxChargeCurrentMicroamps,
             )
     }
 }
@@ -67,6 +71,10 @@ data class BatteryLabSnapshot(
     val activeProfile: BatteryLabProfileParcel?,
     val chargingSuspendedByBomb: Boolean,
     val lastDecisionReason: String?,
+    /** A writable charge-current-limit node was probed. */
+    val chargeCurrentControlSupported: Boolean = false,
+    /** The node's advertised current ceiling in microamps, for the slider top. */
+    val maxSupportedChargeCurrentMicroamps: Int? = null,
 ) : Parcelable {
     val parsedBackendStatus: BatteryLabBackendStatus
         get() = runCatching { BatteryLabBackendStatus.valueOf(backendStatus) }

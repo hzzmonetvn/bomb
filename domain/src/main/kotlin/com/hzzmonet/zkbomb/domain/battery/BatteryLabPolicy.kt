@@ -9,6 +9,13 @@ data class BatteryLabProfile(
     val maxTemperatureDeciCelsius: Int? = null,
     val capacityResumeHysteresisPercent: Int = 5,
     val temperatureResumeHysteresisDeciCelsius: Int = 30,
+    /**
+     * Cap on charge current in microamps (matching the sysfs `current_now` /
+     * `constant_charge_current_max` ABI). Null leaves the current uncapped.
+     * Unlike the capacity/temperature limits this is a static ceiling written once
+     * while the profile is active, not part of the hysteresis suspend/restore loop.
+     */
+    val maxChargeCurrentMicroamps: Int? = null,
 )
 
 object BatteryLabProfileValidator {
@@ -21,9 +28,28 @@ object BatteryLabProfileValidator {
     const val MIN_TEMPERATURE_HYSTERESIS_DECI_CELSIUS = 10
     const val MAX_TEMPERATURE_HYSTERESIS_DECI_CELSIUS = 100
 
+    // Absolute sanity bounds for a charge-current cap, in microamps: 100 mA floor
+    // (below this charging barely progresses) and 20 A ceiling (well above any
+    // phone charger). The device's real ladder is narrower; the UI constrains to
+    // the node's advertised ceiling and the backend re-checks the write.
+    const val MIN_CHARGE_CURRENT_MICROAMPS = 100_000
+    const val MAX_CHARGE_CURRENT_MICROAMPS = 20_000_000
+
     fun violations(profile: BatteryLabProfile): List<String> = buildList {
-        if (profile.chargeLimitPercent == null && profile.maxTemperatureDeciCelsius == null) {
-            add("At least one charge or temperature limit is required")
+        if (profile.chargeLimitPercent == null &&
+            profile.maxTemperatureDeciCelsius == null &&
+            profile.maxChargeCurrentMicroamps == null
+        ) {
+            add("At least one charge, temperature or current limit is required")
+        }
+        if (profile.maxChargeCurrentMicroamps != null &&
+            profile.maxChargeCurrentMicroamps !in
+            MIN_CHARGE_CURRENT_MICROAMPS..MAX_CHARGE_CURRENT_MICROAMPS
+        ) {
+            add(
+                "maxChargeCurrentMicroamps must be in " +
+                    "$MIN_CHARGE_CURRENT_MICROAMPS..$MAX_CHARGE_CURRENT_MICROAMPS",
+            )
         }
         if (profile.chargeLimitPercent != null &&
             profile.chargeLimitPercent !in MIN_CHARGE_LIMIT_PERCENT..MAX_CHARGE_LIMIT_PERCENT

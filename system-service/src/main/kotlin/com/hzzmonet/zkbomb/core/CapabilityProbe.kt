@@ -209,6 +209,14 @@ class CapabilityProbe(
             },
         )
         builder.set(
+            BombCapability.CHARGE_CURRENT_CONTROL,
+            when {
+                powerSupplyCapabilities.chargeCurrentControl -> CapabilityState.SUPPORTED
+                powerSupplyCapabilities.currentLimitNodePresent -> CapabilityState.REQUIRES_ROOT
+                else -> CapabilityState.UNSUPPORTED
+            },
+        )
+        builder.set(
             BombCapability.AUTOMATION_RULES,
             if (context.getSystemService(android.app.usage.UsageStatsManager::class.java) != null) {
                 CapabilityState.SUPPORTED
