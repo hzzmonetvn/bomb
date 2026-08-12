@@ -180,6 +180,12 @@ internal data class PowerSupplyCapabilities(
 class PowerSupplyBackend internal constructor(
     private val access: PowerSupplyNodeAccess = RealPowerSupplyNodeAccess(),
     private val elapsedRealtimeMillis: () -> Long = { android.os.SystemClock.elapsedRealtime() },
+    // Charge-current writes never touch sysfs from this process: they are published
+    // as a bounded request through bombd, and init owns the actual node write. The
+    // app only reads the node back (to capture and to check ownership).
+    private val chargeCurrentWriter: (Int) -> Boolean = { microamps ->
+        RomControlPropertyWriter().requestChargeCurrentMax(microamps)
+    },
 ) {
     internal fun capabilities(): PowerSupplyCapabilities {
         val battery = batterySupplyName() ?: return PowerSupplyCapabilities(
@@ -223,12 +229,16 @@ class PowerSupplyBackend internal constructor(
         val gate = gateCandidates.firstOrNull {
             access.canWrite(it.supplyName, it.node)
         }
+        // Detection is presence-based, not app-writability: the write goes through
+        // init (which owns the node), so `canWrite` from this process is always
+        // false and is the wrong signal. A node that reads a plausible µA value is
+        // taken as the control; CapabilityProbe further requires ROM mode plus a
+        // reachable bombd before reporting the capability SUPPORTED.
         val currentLimitCandidates = currentLimitCandidates(battery)
-        val advertisedCurrent = currentLimitCandidates
-            .firstNotNullOfOrNull { ref -> readCurrentMicroamps(ref) }
         val currentLimit = currentLimitCandidates.firstOrNull { ref ->
-            readCurrentMicroamps(ref) != null && access.canWrite(ref.supplyName, ref.node)
+            readCurrentMicroamps(ref) != null
         }
+        val advertisedCurrent = currentLimit?.let { readCurrentMicroamps(it) }
         return PowerSupplyCapabilities(
             telemetry = telemetry,
             capacityTelemetry = capacity,
@@ -402,7 +412,9 @@ class PowerSupplyBackend internal constructor(
         if (microamps !in MIN_CURRENT_MICROAMPS..MAX_CURRENT_MICROAMPS) return null
         val ref = capabilities().currentLimitControl ?: return null
         val original = readCurrentMicroamps(ref) ?: return null
-        return if (writeCurrentAndVerify(ref, microamps)) {
+        // The write is published through bombd; init performs the sysfs write. A
+        // false here means bombd rejected or was unreachable.
+        return if (chargeCurrentWriter(microamps)) {
             CapturedCurrentLimit(ref, original, microamps)
         } else {
             null
@@ -410,35 +422,18 @@ class PowerSupplyBackend internal constructor(
     }
 
     internal fun restoreCurrentLimit(captured: CapturedCurrentLimit): Boolean {
-        if (!currentLimitStillWritable(captured.ref)) return false
+        if (capabilities().currentLimitControl != captured.ref) return false
         val current = readCurrentMicroamps(captured.ref) ?: return false
-        // A vendor charging daemon may have moved the cap since Bomb wrote it. If so
-        // Bomb no longer owns the node and must not clobber the newer value.
+        // A vendor charging daemon may have moved the cap since Bomb set it. If so
+        // Bomb no longer owns the node and must not push its stale baseline back.
         if (current != captured.appliedMicroamps) return true
-        return writeCurrentAndVerify(captured.ref, captured.originalMicroamps)
+        return chargeCurrentWriter(captured.originalMicroamps)
     }
 
-    /** Re-apply [captured] after a restart, if the node is still the writable one. */
+    /** Re-apply [captured] after a restart, if the node is still the probed one. */
     internal fun reconcileCurrentLimit(captured: CapturedCurrentLimit): Boolean {
         if (capabilities().currentLimitControl != captured.ref) return false
-        return writeCurrentAndVerify(captured.ref, captured.appliedMicroamps)
-    }
-
-    private fun currentLimitStillWritable(ref: CurrentLimitRef): Boolean =
-        capabilities().currentLimitControl == ref &&
-            access.canWrite(ref.supplyName, ref.node) &&
-            readCurrentMicroamps(ref) != null
-
-    private fun writeCurrentAndVerify(ref: CurrentLimitRef, microamps: Int): Boolean {
-        val value = microamps.toString()
-        if (!SAFE_CONTROL_VALUE.matches(value)) return false
-        if (!access.write(ref.supplyName, ref.node, value)) return false
-        // Some regulators snap the request to a hardware step, so verify the driver
-        // accepted a value at or below what was asked (never higher — that would
-        // mean the cap did not take), within a small tolerance.
-        val readBack = access.read(ref.supplyName, ref.node)?.toIntOrNull() ?: return false
-        return readBack in (microamps - CURRENT_STEP_TOLERANCE_MICROAMPS)..microamps ||
-            readBack == microamps
+        return chargeCurrentWriter(captured.appliedMicroamps)
     }
 
     private fun batterySupplyName(): String? {
@@ -505,10 +500,8 @@ class PowerSupplyBackend internal constructor(
         val SUPPLY_NAME = Regex("^[A-Za-z0-9_.-]{1,64}$")
         val SAFE_CONTROL_VALUE = Regex("^-?[0-9]{1,12}$")
 
-        // Charge-current node value bounds in µA, and the tolerance allowed when a
-        // regulator snaps the requested cap down to a hardware step.
+        // Charge-current node value bounds in µA (plausibility gate for the probe).
         const val MIN_CURRENT_MICROAMPS = 100_000
         const val MAX_CURRENT_MICROAMPS = 20_000_000
-        const val CURRENT_STEP_TOLERANCE_MICROAMPS = 100_000
     }
 }

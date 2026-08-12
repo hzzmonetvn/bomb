@@ -211,7 +211,11 @@ class CapabilityProbe(
         builder.set(
             BombCapability.CHARGE_CURRENT_CONTROL,
             when {
-                powerSupplyCapabilities.chargeCurrentControl -> CapabilityState.SUPPORTED
+                // The write is routed through bombd + the init trigger, so the node
+                // being present is not enough — the control plane must be reachable
+                // in ROM mode, exactly as ZRAM_CONTROL requires.
+                powerSupplyCapabilities.currentLimitNodePresent &&
+                    romMode && controlWriter.available -> CapabilityState.SUPPORTED
                 powerSupplyCapabilities.currentLimitNodePresent -> CapabilityState.REQUIRES_ROOT
                 else -> CapabilityState.UNSUPPORTED
             },

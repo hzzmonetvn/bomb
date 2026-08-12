@@ -17,6 +17,15 @@ allow bomb_app proc:dir search;
 allow bomb_app sysfs:dir search;
 allow bomb_app sysfs_zram:dir { read getattr open search };
 allow bomb_app sysfs_zram:file { read getattr open };
+
+# Battery Lab reads /sys/class/power_supply to probe charge-control capability, to
+# build the snapshot, and to read back a charge-current write for verification. It
+# is strictly read-only here: the app never writes these nodes — init owns the
+# write via the persist.sys.bomb.charge.* trigger in bomb.rc (below). sysfs_batteryinfo
+# is the AOSP label for the power-supply class; a vendor charge node that carries a
+# different type on the target needs the matching read rule added here.
+allow bomb_app sysfs_batteryinfo:dir { read getattr open search };
+allow bomb_app sysfs_batteryinfo:file { read getattr open };
 allow bomb_app cgroup:dir { read getattr open search };
 allow bomb_app cgroup:file { read getattr open };
 
@@ -29,3 +38,10 @@ allow bomb_app bomb_memory_proc:file { read getattr open };
 allow bomb_app proc_stat:file { read getattr open };
 allow init bomb_memory_proc:file { write lock append map open };
 allow vendor_init bomb_memory_proc:file { write lock append map open };
+
+# init performs the charge-current write when persist.sys.bomb.charge.current_max
+# changes (bomb.rc). vendor_init covers ROMs that run the trigger in the vendor
+# init domain. Most base policies already grant init sysfs write; this states the
+# dependency explicitly so the control plane does not rely on an implicit rule.
+allow init sysfs_batteryinfo:file { open write append getattr };
+allow vendor_init sysfs_batteryinfo:file { open write append getattr };

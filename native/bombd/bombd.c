@@ -144,6 +144,24 @@ static bool apply_memory(char *field, char *value_text) {
     return set_property(property, value_buffer);
 }
 
+/*
+ * Charge-current cap, in microamps. Only the "current_max" field is accepted, and
+ * only a bounded microamp value: init owns the actual sysfs write (see bomb.rc),
+ * bombd merely publishes the range-checked request property. The bounds match the
+ * app-side BatteryLabProfileValidator and PowerSupplyBackend node bounds.
+ */
+static bool apply_charge(char *field, char *value_text) {
+    if (field == NULL || value_text == NULL) return false;
+    int value = 0;
+    if (strcmp(field, "current_max") != 0 ||
+        !parse_int(value_text, 100000, 20000000, &value)) {
+        return false;
+    }
+    char value_buffer[12];
+    snprintf(value_buffer, sizeof(value_buffer), "%d", value);
+    return set_property("persist.sys.bomb.charge.current_max", value_buffer);
+}
+
 static bool dispatch(char *request) {
     char *save = NULL;
     char *verb = strtok_r(request, " ", &save);
@@ -154,6 +172,7 @@ static bool dispatch(char *request) {
     if (strtok_r(NULL, " ", &save) != NULL) return false;
     if (strcmp(verb, "LOG") == 0) return apply_log(argument, value);
     if (strcmp(verb, "MEM") == 0) return apply_memory(argument, value);
+    if (strcmp(verb, "CHARGE") == 0) return apply_charge(argument, value);
     return false;
 }
 

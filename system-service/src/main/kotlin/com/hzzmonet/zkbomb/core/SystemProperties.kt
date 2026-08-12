@@ -79,6 +79,17 @@ class RomControlPropertyWriter(
         if (pageCluster != null && !client.request("MEM page_cluster $pageCluster")) return false
         return true
     }
+
+    /**
+     * Publish a charge-current cap in microamps. The APK never writes the sysfs
+     * node; bombd range-checks and sets the request property, and init performs the
+     * write via the `persist.sys.bomb.charge.current_max` trigger. Bounds mirror the
+     * bombd handler and the domain BatteryLabProfileValidator.
+     */
+    fun requestChargeCurrentMax(microamps: Int): Boolean {
+        if (microamps !in 100_000..20_000_000) return false
+        return client.request("CHARGE current_max $microamps")
+    }
 }
 
 /** Client for the fixed, line-oriented bombd protocol. */
@@ -107,7 +118,8 @@ class BombdClient {
         // client cannot be turned into a generic command transport either.
         val VALID_COMMAND = Regex(
             "^(PING|LOG (default|reduced|off) (-1|[0-9]{1,4})|" +
-                "MEM (swappiness|page_cluster) [0-9]{1,3})$",
+                "MEM (swappiness|page_cluster) [0-9]{1,3}|" +
+                "CHARGE current_max [0-9]{1,8})$",
         )
     }
 }
