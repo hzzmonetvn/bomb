@@ -179,13 +179,14 @@ internal data class PowerSupplyCapabilities(
 /** Capability-probed, allowlisted backend for `/sys/class/power_supply`. */
 class PowerSupplyBackend internal constructor(
     private val access: PowerSupplyNodeAccess = RealPowerSupplyNodeAccess(),
-    private val elapsedRealtimeMillis: () -> Long = { android.os.SystemClock.elapsedRealtime() },
     // Charge-current writes never touch sysfs from this process: they are published
     // as a bounded request through bombd, and init owns the actual node write. The
-    // app only reads the node back (to capture and to check ownership).
+    // app only reads the node back (to capture and to check ownership). Kept ahead
+    // of elapsedRealtimeMillis so the latter stays the trailing-lambda parameter.
     private val chargeCurrentWriter: (Int) -> Boolean = { microamps ->
         RomControlPropertyWriter().requestChargeCurrentMax(microamps)
     },
+    private val elapsedRealtimeMillis: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
     internal fun capabilities(): PowerSupplyCapabilities {
         val battery = batterySupplyName() ?: return PowerSupplyCapabilities(
