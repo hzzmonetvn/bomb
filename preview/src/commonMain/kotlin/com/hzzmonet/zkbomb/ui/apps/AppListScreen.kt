@@ -4,6 +4,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.hzzmonet.zkbomb.data.LiveApp
@@ -29,10 +33,44 @@ private val filters = listOf("All", "User", "System", "Frozen", "Disabled")
  * otherwise. Rows are emitted individually so a 300-app list stays lazy and
  * icons load only for what is on screen.
  */
+/**
+ * The filtered app list, memoised.
+ *
+ * `derivedStateOf` recomputes the filter only when the query, the filter chip or
+ * the freeze set actually change — not on every unrelated shell recomposition
+ * (theme toggle, the LIVE/SAMPLE poll). Computed by the host composable and passed
+ * into [appListContent], which is a non-composable `LazyListScope` builder and so
+ * cannot itself hold remembered state. Null mirrors [apps] being unavailable.
+ */
+@Composable
+fun rememberVisibleApps(state: PreviewUiState, apps: List<LiveApp>?): List<LiveApp>? {
+    if (apps == null) return null
+    val visible by remember(apps) {
+        derivedStateOf {
+            val query = state.appQuery.text.toString().trim().lowercase()
+            apps.filter { app ->
+                val matchesQuery = query.isEmpty() ||
+                    app.name.lowercase().contains(query) ||
+                    app.packageName.lowercase().contains(query)
+                val matchesFilter = when (state.appFilter) {
+                    1 -> !app.isSystem
+                    2 -> app.isSystem
+                    3 -> state.freezeList.containsKey(app.packageName)
+                    4 -> !app.enabled
+                    else -> true
+                }
+                matchesQuery && matchesFilter
+            }
+        }
+    }
+    return visible
+}
+
 fun LazyListScope.appListContent(
     state: PreviewUiState,
     navigator: BombNavigator,
     apps: List<LiveApp>?,
+    visible: List<LiveApp>?,
 ) {
     item {
         TextField(
@@ -60,25 +98,10 @@ fun LazyListScope.appListContent(
         )
     }
 
-    val query = state.appQuery.text.toString().trim().lowercase()
-
-    if (apps == null) {
+    if (apps == null || visible == null) {
+        val query = state.appQuery.text.toString().trim().lowercase()
         sampleApps(state, navigator, query)
         return
-    }
-
-    val visible = apps.filter { app ->
-        val matchesQuery = query.isEmpty() ||
-            app.name.lowercase().contains(query) ||
-            app.packageName.lowercase().contains(query)
-        val matchesFilter = when (state.appFilter) {
-            1 -> !app.isSystem
-            2 -> app.isSystem
-            3 -> state.freezeList.containsKey(app.packageName)
-            4 -> !app.enabled
-            else -> true
-        }
-        matchesQuery && matchesFilter
     }
 
     item { BombSectionTitle("${visible.size} of ${apps.size} apps") }
@@ -88,7 +111,10 @@ fun LazyListScope.appListContent(
         return
     }
 
-    items(visible.size) { index ->
+    // Keyed by package so a filter or search change re-keys stable rows instead of
+    // recomposing every position — Compose reuses the unchanged rows (and their
+    // already-loaded icons) rather than rebuilding the list wholesale.
+    items(count = visible.size, key = { visible[it].packageName }) { index ->
         val app = visible[index]
         BombCard {
             BombAppRow(

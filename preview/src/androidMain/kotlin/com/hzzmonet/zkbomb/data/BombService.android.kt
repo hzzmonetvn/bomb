@@ -840,6 +840,7 @@ private fun BatteryLabProfileParcel.toCommon(): BombBatteryLabProfile = BombBatt
     maxTemperatureDeciCelsius = maxTemperatureDeciCelsius,
     capacityResumeHysteresisPercent = capacityResumeHysteresisPercent,
     temperatureResumeHysteresisDeciCelsius = temperatureResumeHysteresisDeciCelsius,
+    maxChargeCurrentMicroamps = maxChargeCurrentMicroamps,
 )
 
 private fun BombBatteryLabProfile.toParcel(): BatteryLabProfileParcel = BatteryLabProfileParcel(
@@ -847,6 +848,7 @@ private fun BombBatteryLabProfile.toParcel(): BatteryLabProfileParcel = BatteryL
     maxTemperatureDeciCelsius = maxTemperatureDeciCelsius,
     capacityResumeHysteresisPercent = capacityResumeHysteresisPercent,
     temperatureResumeHysteresisDeciCelsius = temperatureResumeHysteresisDeciCelsius,
+    maxChargeCurrentMicroamps = maxChargeCurrentMicroamps,
 )
 
 private fun BatteryLabSnapshot.toCommon(): BombBatteryLabSnapshot = BombBatteryLabSnapshot(
@@ -869,6 +871,8 @@ private fun BatteryLabSnapshot.toCommon(): BombBatteryLabSnapshot = BombBatteryL
     activeProfile = activeProfile?.toCommon(),
     chargingSuspendedByBomb = chargingSuspendedByBomb,
     lastDecisionReason = lastDecisionReason,
+    chargeCurrentControlSupported = chargeCurrentControlSupported,
+    maxSupportedChargeCurrentMicroamps = maxSupportedChargeCurrentMicroamps,
 )
 
 private fun BridgeEventStatusParcel.toCommon(): BombBridgeEventStatus =

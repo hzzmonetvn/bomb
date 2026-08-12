@@ -31,6 +31,7 @@ import com.hzzmonet.zkbomb.data.rememberVoipRecorder
 import com.hzzmonet.zkbomb.ui.adblock.adBlockContent
 import com.hzzmonet.zkbomb.ui.apps.appControlContent
 import com.hzzmonet.zkbomb.ui.apps.appListContent
+import com.hzzmonet.zkbomb.ui.apps.rememberVisibleApps
 import com.hzzmonet.zkbomb.ui.automation.automationContent
 import com.hzzmonet.zkbomb.ui.battery.batteryLabContent
 import com.hzzmonet.zkbomb.ui.bridge.bridgeContent
@@ -153,6 +154,10 @@ private fun BombAppShell(
     // One sampler for the whole app: every screen reads the same snapshot.
     val system = rememberSystemView(state.samplingIntervalMillis)
     val apps = rememberInstalledApps()
+    // Filtered once here (derivedStateOf) so the app list does not re-run its filter
+    // on every unrelated shell recomposition; the LazyListScope builder cannot hold
+    // remembered state itself.
+    val visibleApps = rememberVisibleApps(state, apps)
     // Bound once for the whole app. Each additional call site would be another
     // connection opened and closed on every recomposition.
     val service = rememberBombService()
@@ -217,7 +222,7 @@ private fun BombAppShell(
         ) {
             when (targetRoute) {
                 BombRoute.Home -> homeContent(state, navigator, system, service, install)
-                BombRoute.Apps -> appListContent(state, navigator, apps)
+                BombRoute.Apps -> appListContent(state, navigator, apps, visibleApps)
                 BombRoute.Monitor -> monitorContent(state, system, telemetry)
                 BombRoute.Automation -> automationContent(service, apps)
                 BombRoute.More -> moreContent(state, navigator)

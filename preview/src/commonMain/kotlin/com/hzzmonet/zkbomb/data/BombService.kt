@@ -387,12 +387,21 @@ enum class BombBatteryLabBackendStatus {
     }
 }
 
-/** A charge/thermal policy, mirroring `core-api BatteryLabProfileParcel`. */
+/**
+ * A charge/thermal policy, mirroring `core-api BatteryLabProfileParcel`.
+ *
+ * [maxChargeCurrentMicroamps] caps the charge current (in µA, the same unit as the
+ * snapshot's `currentMicroamps`); null means "do not limit current". It defaults to
+ * null and is **not yet round-tripped by the adapter** — it lands only once the v9
+ * parcel gains the matching field (see the adapter TODO). Kept in µA for one
+ * consistent unit across the battery surface; the UI divides by 1000 to show mA.
+ */
 data class BombBatteryLabProfile(
     val chargeLimitPercent: Int?,
     val maxTemperatureDeciCelsius: Int?,
     val capacityResumeHysteresisPercent: Int,
     val temperatureResumeHysteresisDeciCelsius: Int,
+    val maxChargeCurrentMicroamps: Int? = null,
 )
 
 /**
@@ -421,6 +430,15 @@ data class BombBatteryLabSnapshot(
     val activeProfile: BombBatteryLabProfile?,
     val chargingSuspendedByBomb: Boolean,
     val lastDecisionReason: String?,
+    /**
+     * Whether the backend probed a writable max-charge-current node. Defaults to
+     * false and is not yet fed by the adapter — the control stays fail-closed until
+     * the v9 snapshot parcel gains this field. [maxSupportedChargeCurrentMicroamps]
+     * is the device's advertised ceiling (µA), used as the slider's top; null falls
+     * back to a conservative default.
+     */
+    val chargeCurrentControlSupported: Boolean = false,
+    val maxSupportedChargeCurrentMicroamps: Int? = null,
 ) {
     /** Battery wear health, if both charge-full counters are present. */
     val healthPercent: Int?
@@ -952,6 +970,7 @@ object BombCapabilityKeys {
     const val CHARGE_CONTROL = "CHARGE_CONTROL"
     const val CHARGE_LIMIT_CONTROL = "CHARGE_LIMIT_CONTROL"
     const val THERMAL_CHARGE_CONTROL = "THERMAL_CHARGE_CONTROL"
+    const val CHARGE_CURRENT_CONTROL = "CHARGE_CURRENT_CONTROL"
     const val ZRAM_CONTROL = "ZRAM_CONTROL"
     const val AUTOMATION_RULES = "AUTOMATION_RULES"
     const val LOG_REDUCE = "LOG_REDUCE"
@@ -977,7 +996,8 @@ object BombCapabilityKeys {
         "Network" to listOf(AD_BLOCK, DNS_CONTROL, FIREWALL, PROXY_GATEWAY),
         "Device" to listOf(
             PERFORMANCE_CONTROL, CPU_FREQUENCY_CONTROL, GPU_FREQUENCY_CONTROL,
-            CHARGE_CONTROL, CHARGE_LIMIT_CONTROL, THERMAL_CHARGE_CONTROL, ZRAM_CONTROL,
+            CHARGE_CONTROL, CHARGE_LIMIT_CONTROL, THERMAL_CHARGE_CONTROL,
+            CHARGE_CURRENT_CONTROL, ZRAM_CONTROL,
         ),
         "Automation" to listOf(AUTOMATION_RULES),
         "Logging" to listOf(LOG_REDUCE, LOG_DISABLE),

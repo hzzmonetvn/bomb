@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -282,18 +283,20 @@ private fun CallerSelector(
             } else {
                 Column {
                     filtered.forEachIndexed { idx, app ->
-                        if (idx > 0) BombRowDivider()
-                        BombAppRow(
-                            name = app.name,
-                            packageName = app.packageName,
-                            tint = PreviewData.tintFor(app.packageName),
-                            trailing = if (app.packageName == selected?.packageName) "✓" else null,
-                            iconPackage = app.packageName,
-                            onClick = {
-                                onSelect(app)
-                                expanded = false
-                            },
-                        )
+                        key(app.packageName) {
+                            if (idx > 0) BombRowDivider()
+                            BombAppRow(
+                                name = app.name,
+                                packageName = app.packageName,
+                                tint = PreviewData.tintFor(app.packageName),
+                                trailing = if (app.packageName == selected?.packageName) "✓" else null,
+                                iconPackage = app.packageName,
+                                onClick = {
+                                    onSelect(app)
+                                    expanded = false
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -357,19 +360,21 @@ private fun PackageSelectionCard(
         } else {
             Column {
                 filtered.forEachIndexed { idx, app ->
-                    if (idx > 0) BombRowDivider()
-                    BombSwitchPreference(
-                        title = app.name,
-                        summary = if (mode == BombVisibilityMode.WHITELIST) {
-                            "Visible to ${caller.name} — ${app.packageName}"
-                        } else {
-                            "Hidden from ${caller.name} — ${app.packageName}"
-                        },
-                        checked = selection[app.packageName] == true,
-                        onCheckedChange = { checked ->
-                            if (checked) selection[app.packageName] = true else selection.remove(app.packageName)
-                        },
-                    )
+                    key(app.packageName) {
+                        if (idx > 0) BombRowDivider()
+                        BombSwitchPreference(
+                            title = app.name,
+                            summary = if (mode == BombVisibilityMode.WHITELIST) {
+                                "Visible to ${caller.name} — ${app.packageName}"
+                            } else {
+                                "Hidden from ${caller.name} — ${app.packageName}"
+                            },
+                            checked = selection[app.packageName] == true,
+                            onCheckedChange = { checked ->
+                                if (checked) selection[app.packageName] = true else selection.remove(app.packageName)
+                            },
+                        )
+                    }
                 }
             }
         }

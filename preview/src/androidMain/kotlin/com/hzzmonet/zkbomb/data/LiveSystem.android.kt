@@ -311,15 +311,28 @@ private fun loadApps(context: Context): List<LiveApp> {
     }.sortedBy { it.name.lowercase() }
 }
 
+// Decoded launcher icons, kept process-wide so a row scrolling back into view
+// paints from memory instead of decoding the PackageManager drawable again — the
+// repeated decode on a recycled LazyColumn row is the main source of list scroll
+// jank. Bounded by byte size (~8 MB) so a large app list cannot grow it without
+// limit; the least-recently-shown icons are evicted first.
+private val appIconCache = object : android.util.LruCache<String, ImageBitmap>(8 * 1024 * 1024) {
+    override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * 4
+}
+
 @Composable
 actual fun rememberAppIcon(packageName: String): ImageBitmap? {
     val context = LocalContext.current
-    return produceState<ImageBitmap?>(initialValue = null, packageName) {
+    // A cache hit seeds the initial value, so a recycled row that already loaded
+    // this icon paints it on the first frame with no IO and no recomposition wait.
+    val cached = appIconCache.get(packageName)
+    return produceState<ImageBitmap?>(initialValue = cached, packageName) {
+        appIconCache.get(packageName)?.let { value = it; return@produceState }
         value = withContext(Dispatchers.IO) {
             runCatching {
                 context.packageManager.getApplicationIcon(packageName).toImageBitmap()
             }.getOrNull()
-        }
+        }?.also { appIconCache.put(packageName, it) }
     }.value
 }
 

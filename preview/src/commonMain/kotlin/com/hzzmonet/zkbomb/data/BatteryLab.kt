@@ -47,10 +47,27 @@ object BombBatteryBounds {
     const val MIN_CAPACITY_RESUME_FLOOR_PERCENT = 20
     const val MIN_TEMPERATURE_RESUME_FLOOR_DECI_CELSIUS = 300
 
+    // Max charge current, in µA (sysfs's native unit, matching currentMicroamps).
+    // The floor keeps a limit from starving the charger; the ceiling is per-device
+    // (snapshot.maxSupportedChargeCurrentMicroamps) and only this fallback is used
+    // when the device did not advertise one. The step is the slider granularity.
+    const val MIN_CHARGE_CURRENT_MICROAMPS = 500_000
+    const val DEFAULT_CHARGE_CURRENT_MICROAMPS = 2_000_000
+    const val FALLBACK_CEILING_CHARGE_CURRENT_MICROAMPS = 5_000_000
+    const val CHARGE_CURRENT_STEP_MICROAMPS = 100_000
+
     /** Reason the composed profile would be rejected, or null when acceptable. */
     fun violation(profile: BombBatteryLabProfile): String? {
-        if (profile.chargeLimitPercent == null && profile.maxTemperatureDeciCelsius == null) {
-            return "Set a charge limit or a temperature limit"
+        if (profile.chargeLimitPercent == null &&
+            profile.maxTemperatureDeciCelsius == null &&
+            profile.maxChargeCurrentMicroamps == null
+        ) {
+            return "Set a charge limit, a temperature limit or a current limit"
+        }
+        profile.maxChargeCurrentMicroamps?.let { microamps ->
+            if (microamps < MIN_CHARGE_CURRENT_MICROAMPS) {
+                return "Charge current must be at least ${MIN_CHARGE_CURRENT_MICROAMPS / 1000} mA"
+            }
         }
         profile.chargeLimitPercent?.let { limit ->
             if (limit !in MIN_CHARGE_LIMIT_PERCENT..MAX_CHARGE_LIMIT_PERCENT) {

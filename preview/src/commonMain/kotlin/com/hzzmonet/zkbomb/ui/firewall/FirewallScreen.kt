@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -176,6 +177,7 @@ private fun FirewallConsole(service: BombServiceState, apps: List<LiveApp>) {
         } else {
             BombCard {
                 filtered.forEachIndexed { idx, app ->
+                    key(app.packageName) {
                     if (idx > 0) BombRowDivider()
                     FirewallAppRow(
                         app = app,
@@ -210,6 +212,7 @@ private fun FirewallConsole(service: BombServiceState, apps: List<LiveApp>) {
                             }
                         },
                     )
+                    }
                 }
             }
         }

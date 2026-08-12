@@ -166,15 +166,21 @@ private fun ChargeControlCard(
     val controller = service.controller
     val canCharge = snapshot.chargeLimitControlSupported
     val canThermal = snapshot.thermalChargeControlSupported
+    val canCurrent = snapshot.chargeCurrentControlSupported
 
-    if (!canCharge && !canThermal) {
+    if (!canCharge && !canThermal && !canCurrent) {
         BombUnsupportedState(
             title = "Charge policy",
-            reason = "No writable charge-limit or thermal-control node was probed on this device. " +
-                "Bomb enables only controls it verified — it does not guess vendor paths.",
+            reason = "No writable charge-limit, thermal-control or charge-current node was probed on " +
+                "this device. Bomb enables only controls it verified — it does not guess vendor paths.",
         )
         return
     }
+
+    // The charge-current ceiling the slider tops out at: the device's advertised
+    // maximum when known, otherwise a conservative fallback.
+    val currentCeilingMicroamps = snapshot.maxSupportedChargeCurrentMicroamps
+        ?: BombBatteryBounds.FALLBACK_CEILING_CHARGE_CURRENT_MICROAMPS
 
     // Composed desired policy. The active policy is shown separately from the
     // snapshot, so this is what the user is about to apply — not a live readout.
@@ -186,6 +192,15 @@ private fun ChargeControlCard(
     var maxTempDeci by remember {
         mutableIntStateOf(snapshot.activeProfile?.maxTemperatureDeciCelsius ?: 450)
     }
+    var currentOn by remember {
+        mutableStateOf(snapshot.activeProfile?.maxChargeCurrentMicroamps != null && canCurrent)
+    }
+    var maxCurrentMicroamps by remember {
+        mutableIntStateOf(
+            snapshot.activeProfile?.maxChargeCurrentMicroamps
+                ?: BombBatteryBounds.DEFAULT_CHARGE_CURRENT_MICROAMPS.coerceAtMost(currentCeilingMicroamps),
+        )
+    }
     var status by remember { mutableStateOf<V6ApplyState>(V6ApplyState.Idle) }
     val applying = status is V6ApplyState.Applying
 
@@ -194,6 +209,7 @@ private fun ChargeControlCard(
         maxTemperatureDeciCelsius = if (thermalOn) maxTempDeci else null,
         capacityResumeHysteresisPercent = BombBatteryBounds.DEFAULT_CAPACITY_HYSTERESIS_PERCENT,
         temperatureResumeHysteresisDeciCelsius = BombBatteryBounds.DEFAULT_TEMPERATURE_HYSTERESIS_DECI_CELSIUS,
+        maxChargeCurrentMicroamps = if (currentOn) maxCurrentMicroamps else null,
     )
     val violation = BombBatteryBounds.violation(draft)
 
@@ -237,6 +253,33 @@ private fun ChargeControlCard(
                     (BombBatteryBounds.MAX_TEMPERATURE_DECI_CELSIUS / 10f),
                 steps = 0,
                 enabled = canThermal && !applying,
+            )
+        }
+        BombRowDivider()
+        BombSwitchPreference(
+            title = "Charge current limit",
+            summary = if (canCurrent) {
+                "Cap the charging current to run cooler and slow wear"
+            } else {
+                "No charge-current node on this device"
+            },
+            checked = currentOn,
+            onCheckedChange = { currentOn = it },
+            enabled = canCurrent && !applying,
+        )
+        if (currentOn) {
+            BombRowDivider()
+            BombSliderPreference(
+                title = "Max current",
+                // The slider works in mA (µA / 1000) — the unit the user reads — and
+                // the draft stores µA, matching the snapshot's currentMicroamps.
+                value = (maxCurrentMicroamps / 1000f),
+                onValueChange = { maxCurrentMicroamps = (it.toInt()) * 1000 },
+                valueLabel = "${maxCurrentMicroamps / 1000} mA",
+                valueRange = (BombBatteryBounds.MIN_CHARGE_CURRENT_MICROAMPS / 1000f)..
+                    (currentCeilingMicroamps / 1000f),
+                steps = 0,
+                enabled = canCurrent && !applying,
             )
         }
     }
@@ -323,6 +366,7 @@ private fun describeProfile(profile: BombBatteryLabProfile?): String {
     val parts = buildList {
         profile.chargeLimitPercent?.let { add("charge ≤ $it%") }
         profile.maxTemperatureDeciCelsius?.let { add("temp ≤ ${deciToC(it)}") }
+        profile.maxChargeCurrentMicroamps?.let { add("current ≤ ${it / 1000} mA") }
     }
     return if (parts.isEmpty()) "None" else parts.joinToString(" · ")
 }
