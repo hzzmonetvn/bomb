@@ -4,6 +4,7 @@ import android.content.Context
 import com.hzzmonet.zkbomb.api.BombCapabilities
 import com.hzzmonet.zkbomb.api.BombCapability
 import com.hzzmonet.zkbomb.api.BombResult
+import com.hzzmonet.zkbomb.api.BombRuntimeMode
 import com.hzzmonet.zkbomb.api.CapabilityState
 import com.hzzmonet.zkbomb.domain.recorder.CaptureSupport
 import com.hzzmonet.zkbomb.domain.recorder.RecordingKind
