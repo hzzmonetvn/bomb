@@ -18,11 +18,14 @@ internal data class SysfsFrequencyTarget(
     val nodeNames: Map<FrequencySysfsNode, String>,
 )
 
+/**
+ * Read-only sysfs access. The app reads the cpufreq/GPU nodes to probe and read
+ * back, but it never writes them — every frequency write is routed through
+ * [FrequencyControlWriter] → bombd → init.
+ */
 internal interface FrequencyNodeAccess {
     fun targets(): List<SysfsFrequencyTarget>
     fun read(target: SysfsFrequencyTarget, node: FrequencySysfsNode): String?
-    fun canWrite(target: SysfsFrequencyTarget, node: FrequencySysfsNode): Boolean
-    fun write(target: SysfsFrequencyTarget, node: FrequencySysfsNode, rawValue: Long): Boolean
 }
 
 /** Discovers only fixed cpufreq nodes and GPU directories selected by bounded vendor patterns. */
@@ -41,22 +44,6 @@ internal class RealFrequencyNodeAccess(
                 }
             }.getOrNull()
         }
-
-    override fun canWrite(target: SysfsFrequencyTarget, node: FrequencySysfsNode): Boolean =
-        resolved(target, node)?.canWrite() == true
-
-    override fun write(
-        target: SysfsFrequencyTarget,
-        node: FrequencySysfsNode,
-        rawValue: Long,
-    ): Boolean {
-        if (rawValue <= 0) return false
-        val file = resolved(target, node) ?: return false
-        return runCatching {
-            file.outputStream().bufferedWriter(Charsets.US_ASCII).use { it.write(rawValue.toString()) }
-            true
-        }.getOrDefault(false)
-    }
 
     private fun cpuTargets(): List<SysfsFrequencyTarget> = cpuRoot.listFiles()
         ?.asSequence()
@@ -144,6 +131,26 @@ internal class RealFrequencyNodeAccess(
     }
 }
 
+/**
+ * Publishes a frequency-limit write through the init-owned control plane. The
+ * process never writes the sysfs node: [field] names a bounded request property
+ * (`cpu0_min`..`cpu7_max`, `gpu_min`, `gpu_max`) that bombd range-checks and
+ * sets, and init's bomb.rc trigger performs the write.
+ */
+internal interface FrequencyControlWriter {
+    val available: Boolean
+    fun write(field: String, rawValue: Long): Boolean
+}
+
+internal class BombdFrequencyControlWriter(
+    private val control: RomControlPropertyWriter = RomControlPropertyWriter(),
+) : FrequencyControlWriter {
+    override val available: Boolean get() = control.available
+
+    override fun write(field: String, rawValue: Long): Boolean =
+        control.requestFrequencyControl(field, rawValue)
+}
+
 data class FrequencyScalingCapabilities(
     val cpuPresent: Boolean,
     val cpuWritable: Boolean,
@@ -157,7 +164,9 @@ data class FrequencyScalingCapabilities(
 
 class FrequencyScalingBackend internal constructor(
     private val access: FrequencyNodeAccess = RealFrequencyNodeAccess(),
-    private val waitBeforeVerification: () -> Unit = {},
+    // No frequency write touches sysfs from this process: the raw min/max value is
+    // published as a bounded request through bombd, and init owns the node write.
+    private val writer: FrequencyControlWriter = BombdFrequencyControlWriter(),
 ) {
     @Synchronized
     fun snapshot(): FrequencyScalingSnapshot = FrequencyScalingSnapshot(
@@ -193,20 +202,59 @@ class FrequencyScalingBackend internal constructor(
         val maxRaw = target.rawByMHz[request.maxMHz]
             ?: return BombResult.invalidArgument("maxMHz is not an advertised frequency point")
         if (minRaw > maxRaw) return BombResult.invalidArgument("minMHz must not exceed maxMHz")
+        val minField = fieldFor(target.ref, FrequencySysfsNode.MIN)
+        val maxField = fieldFor(target.ref, FrequencySysfsNode.MAX)
+            ?: return BombResult.unsupported("Frequency target is not routable")
+        if (minField == null) return BombResult.unsupported("Frequency target is not routable")
 
-        val originalMin = readSingleRaw(target.ref, FrequencySysfsNode.MIN)
-            ?: return BombResult.backendUnavailable("Current minimum frequency is unreadable")
-        val originalMax = readSingleRaw(target.ref, FrequencySysfsNode.MAX)
-            ?: return BombResult.backendUnavailable("Current maximum frequency is unreadable")
-        if (originalMin == minRaw && originalMax == maxRaw) return BombResult.success()
+        // A no-op is success without touching the control plane.
+        val currentMin = readSingleRaw(target.ref, FrequencySysfsNode.MIN)
+        val currentMax = readSingleRaw(target.ref, FrequencySysfsNode.MAX)
+        if (currentMin == minRaw && currentMax == maxRaw) return BombResult.success()
 
-        if (!writePair(target.ref, originalMin, originalMax, minRaw, maxRaw)) {
-            val observedMin = readSingleRaw(target.ref, FrequencySysfsNode.MIN) ?: originalMin
-            val observedMax = readSingleRaw(target.ref, FrequencySysfsNode.MAX) ?: originalMax
-            writePair(target.ref, observedMin, observedMax, originalMin, originalMax)
-            return BombResult.failed("Frequency limits were rejected or failed read-back verification")
+        // Order the two routed writes so the kernel never sees min > max midway:
+        // when the new floor is above the current ceiling, raise the ceiling first.
+        val ordered = if (currentMax != null && minRaw > currentMax) {
+            listOf(
+                Triple(maxField, maxRaw, FrequencySysfsNode.MAX),
+                Triple(minField, minRaw, FrequencySysfsNode.MIN),
+            )
+        } else {
+            listOf(
+                Triple(minField, minRaw, FrequencySysfsNode.MIN),
+                Triple(maxField, maxRaw, FrequencySysfsNode.MAX),
+            )
+        }
+        for ((field, raw, node) in ordered) {
+            // A node already at the target value is skipped: init would re-fire the
+            // trigger for nothing. Unlike the old direct writer there is no
+            // read-back rollback — init applies the write asynchronously, so a
+            // failed publish reports backend-unavailable and leaves the already
+            // applied node in place (min <= max is preserved by the ordering).
+            if (readSingleRaw(target.ref, node) == raw) continue
+            if (!writer.write(field, raw)) {
+                return BombResult.backendUnavailable(
+                    "Frequency limit was rejected or bombd was unreachable",
+                )
+            }
         }
         return BombResult.success()
+    }
+
+    /**
+     * The bombd/init request field for a target's min/max node, or null when the
+     * target cannot be routed (a CPU policy outside the allowlisted 0..7 range).
+     */
+    private fun fieldFor(ref: SysfsFrequencyTarget, node: FrequencySysfsNode): String? {
+        val suffix = if (node == FrequencySysfsNode.MIN) "min" else "max"
+        return when (ref.kind) {
+            FrequencyTargetKind.CPU_POLICY -> {
+                val index = ref.publicId.removePrefix("policy").toIntOrNull()
+                    ?.takeIf { it in 0..MAX_ROUTABLE_POLICY } ?: return null
+                "cpu${index}_$suffix"
+            }
+            FrequencyTargetKind.GPU -> "gpu_$suffix"
+        }
     }
 
     private fun probeTargets(): List<ProbedTarget> {
@@ -245,8 +293,15 @@ class FrequencyScalingBackend internal constructor(
             val mhz = toMHz(raw, ref.rawUnitsPerMHz)
             mhz?.takeIf { rawByMHz[it] == raw }
         }.distinct().sorted()
-        val writable = access.canWrite(ref, FrequencySysfsNode.MIN) &&
-            access.canWrite(ref, FrequencySysfsNode.MAX)
+        // Presence-based, not app-writability: writes go through init (which owns
+        // the node), so the DAC bit on this process is always clear and is the
+        // wrong signal. A target is writable when both min and max read back, it
+        // maps to a routable request field, and the control plane is reachable;
+        // CapabilityProbe further requires ROM mode before reporting SUPPORTED.
+        val nodesPresent = currentMinRaw != null && currentMaxRaw != null
+        val routable = fieldFor(ref, FrequencySysfsNode.MIN) != null &&
+            fieldFor(ref, FrequencySysfsNode.MAX) != null
+        val writable = nodesPresent && routable && writer.available
         return ProbedTarget(
             ref,
             rawByMHz,
@@ -260,38 +315,6 @@ class FrequencyScalingBackend internal constructor(
                 writable = writable,
             ),
         )
-    }
-
-    private fun writePair(
-        target: SysfsFrequencyTarget,
-        currentMin: Long,
-        currentMax: Long,
-        desiredMin: Long,
-        desiredMax: Long,
-    ): Boolean {
-        val writes = when {
-            desiredMin > currentMax -> listOf(
-                FrequencySysfsNode.MAX to desiredMax,
-                FrequencySysfsNode.MIN to desiredMin,
-            )
-            desiredMax < currentMin -> listOf(
-                FrequencySysfsNode.MIN to desiredMin,
-                FrequencySysfsNode.MAX to desiredMax,
-            )
-            else -> listOf(
-                FrequencySysfsNode.MIN to desiredMin,
-                FrequencySysfsNode.MAX to desiredMax,
-            )
-        }
-        for ((node, value) in writes) {
-            val current = readSingleRaw(target, node)
-            if (current == value) continue
-            if (!access.write(target, node, value)) return false
-            waitBeforeVerification()
-            if (readSingleRaw(target, node) != value) return false
-        }
-        return readSingleRaw(target, FrequencySysfsNode.MIN) == desiredMin &&
-            readSingleRaw(target, FrequencySysfsNode.MAX) == desiredMax
     }
 
     private fun parseRawList(text: String?): List<Long> {
@@ -318,6 +341,10 @@ class FrequencyScalingBackend internal constructor(
 
     private companion object {
         const val MAX_FREQUENCY_POINTS = 256
+
+        // Fixed init/property fan-out covers policy0..policy7 (see bomb.rc). A
+        // policy beyond this range has no request property and is not routable.
+        const val MAX_ROUTABLE_POLICY = 7
         val WHITESPACE = Regex("\\s+")
     }
 }

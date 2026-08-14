@@ -189,6 +189,60 @@ static bool apply_charge(char *field, char *value_text) {
     return set_property(property, value_buffer);
 }
 
+/* Frequency values can exceed INT_MAX (GPU Hz approaches 2-3e9), so the freq
+ * handler parses a 64-bit value rather than the int used elsewhere. */
+static bool parse_llong(const char *text, long long minimum, long long maximum,
+                        long long *result) {
+    if (text == NULL || *text == '\0') return false;
+    errno = 0;
+    char *end = NULL;
+    long long value = strtoll(text, &end, 10);
+    if (errno != 0 || *end != '\0' || value < minimum || value > maximum) return false;
+    *result = value;
+    return true;
+}
+
+/* cpuN_min / cpuN_max, policy index N in 0..7. The strict charset also makes the
+ * field safe to interpolate into the request property name below. */
+static bool valid_cpu_freq_field(const char *field) {
+    if (strncmp(field, "cpu", 3) != 0) return false;
+    if (field[3] < '0' || field[3] > '7') return false;
+    const char *suffix = field + 4;
+    return strcmp(suffix, "_min") == 0 || strcmp(suffix, "_max") == 0;
+}
+
+/*
+ * CPU/GPU frequency limits. As with charge control, init owns the sysfs write
+ * (bomb.rc) and bombd only publishes the range-checked request property. Fields
+ * mirror the app-side RomControlPropertyWriter and FrequencyScalingBackend:
+ *   cpu0_min..cpu7_max  per-policy scaling_min/max_freq, kHz, 100000..50000000
+ *   gpu_min / gpu_max   GPU devfreq/kgsl min/max, Hz, 10000000..3000000000
+ */
+static bool apply_freq(char *field, char *value_text) {
+    if (field == NULL || value_text == NULL) return false;
+    long long minimum = 0;
+    long long maximum = 0;
+    if (valid_cpu_freq_field(field)) {
+        minimum = 100000LL;
+        maximum = 50000000LL;
+    } else if (strcmp(field, "gpu_min") == 0 || strcmp(field, "gpu_max") == 0) {
+        minimum = 10000000LL;
+        maximum = 3000000000LL;
+    } else {
+        return false;
+    }
+    long long value = 0;
+    if (!parse_llong(value_text, minimum, maximum, &value)) return false;
+    char property[64];
+    if (snprintf(property, sizeof(property), "persist.sys.bomb.freq.%s", field) >=
+        (int)sizeof(property)) {
+        return false;
+    }
+    char value_buffer[24];
+    snprintf(value_buffer, sizeof(value_buffer), "%lld", value);
+    return set_property(property, value_buffer);
+}
+
 static bool dispatch(char *request) {
     char *save = NULL;
     char *verb = strtok_r(request, " ", &save);
@@ -200,6 +254,7 @@ static bool dispatch(char *request) {
     if (strcmp(verb, "LOG") == 0) return apply_log(argument, value);
     if (strcmp(verb, "MEM") == 0) return apply_memory(argument, value);
     if (strcmp(verb, "CHARGE") == 0) return apply_charge(argument, value);
+    if (strcmp(verb, "FREQ") == 0) return apply_freq(argument, value);
     return false;
 }
 

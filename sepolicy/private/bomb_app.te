@@ -57,3 +57,15 @@ allow init vendor_sysfs_battery_supply:file { open write append getattr };
 allow vendor_init vendor_sysfs_battery_supply:file { open write append getattr };
 allow init vendor_sysfs_usb_supply:file { open write append getattr };
 allow vendor_init vendor_sysfs_usb_supply:file { open write append getattr };
+
+# CPU/GPU frequency scaling. The app reads /sys/devices/system/cpu/cpufreq to
+# probe the per-policy ladder and read current min/max back; it never writes the
+# node — init owns the write via the persist.sys.bomb.freq.* trigger in bomb.rc.
+# sysfs_devices_system_cpu is the AOSP label for the cpufreq class. GPU nodes
+# (/sys/class/kgsl, /sys/class/devfreq) carry a vendor-specific type that differs
+# per SoC, so the matching read/write rules for the target's GPU label are added
+# on the ROM side (guarded by type presence) rather than hardcoded here.
+allow bomb_app sysfs_devices_system_cpu:dir { read getattr open search };
+allow bomb_app sysfs_devices_system_cpu:file { read getattr open };
+allow init sysfs_devices_system_cpu:file { open write append getattr };
+allow vendor_init sysfs_devices_system_cpu:file { open write append getattr };

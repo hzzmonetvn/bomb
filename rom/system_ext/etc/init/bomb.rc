@@ -139,3 +139,67 @@ on property:persist.sys.bomb.charge.input_suspend=*
     write /sys/class/power_supply/ac/input_suspend ${persist.sys.bomb.charge.input_suspend}
     write /sys/class/power_supply/mains/input_suspend ${persist.sys.bomb.charge.input_suspend}
     write /sys/class/power_supply/wireless/input_suspend ${persist.sys.bomb.charge.input_suspend}
+
+
+# CPU/GPU frequency limits use the same bounded bombd -> property -> init
+# path as charge control. Fan-out is fixed and allowlisted (per-policy
+# scaling nodes, policy0..policy7; GPU devfreq + kgsl legacy); Bomb never
+# accepts a caller-provided sysfs path. Values are the raw node units the
+# app read back and bombd range-checked: CPU in kHz, GPU in Hz. Non-existent
+# paths fail harmlessly, as with the charge fan-out above.
+on property:persist.sys.bomb.freq.cpu0_min=*
+    write /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq ${persist.sys.bomb.freq.cpu0_min}
+
+on property:persist.sys.bomb.freq.cpu0_max=*
+    write /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq ${persist.sys.bomb.freq.cpu0_max}
+
+on property:persist.sys.bomb.freq.cpu1_min=*
+    write /sys/devices/system/cpu/cpufreq/policy1/scaling_min_freq ${persist.sys.bomb.freq.cpu1_min}
+
+on property:persist.sys.bomb.freq.cpu1_max=*
+    write /sys/devices/system/cpu/cpufreq/policy1/scaling_max_freq ${persist.sys.bomb.freq.cpu1_max}
+
+on property:persist.sys.bomb.freq.cpu2_min=*
+    write /sys/devices/system/cpu/cpufreq/policy2/scaling_min_freq ${persist.sys.bomb.freq.cpu2_min}
+
+on property:persist.sys.bomb.freq.cpu2_max=*
+    write /sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq ${persist.sys.bomb.freq.cpu2_max}
+
+on property:persist.sys.bomb.freq.cpu3_min=*
+    write /sys/devices/system/cpu/cpufreq/policy3/scaling_min_freq ${persist.sys.bomb.freq.cpu3_min}
+
+on property:persist.sys.bomb.freq.cpu3_max=*
+    write /sys/devices/system/cpu/cpufreq/policy3/scaling_max_freq ${persist.sys.bomb.freq.cpu3_max}
+
+on property:persist.sys.bomb.freq.cpu4_min=*
+    write /sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq ${persist.sys.bomb.freq.cpu4_min}
+
+on property:persist.sys.bomb.freq.cpu4_max=*
+    write /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq ${persist.sys.bomb.freq.cpu4_max}
+
+on property:persist.sys.bomb.freq.cpu5_min=*
+    write /sys/devices/system/cpu/cpufreq/policy5/scaling_min_freq ${persist.sys.bomb.freq.cpu5_min}
+
+on property:persist.sys.bomb.freq.cpu5_max=*
+    write /sys/devices/system/cpu/cpufreq/policy5/scaling_max_freq ${persist.sys.bomb.freq.cpu5_max}
+
+on property:persist.sys.bomb.freq.cpu6_min=*
+    write /sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq ${persist.sys.bomb.freq.cpu6_min}
+
+on property:persist.sys.bomb.freq.cpu6_max=*
+    write /sys/devices/system/cpu/cpufreq/policy6/scaling_max_freq ${persist.sys.bomb.freq.cpu6_max}
+
+on property:persist.sys.bomb.freq.cpu7_min=*
+    write /sys/devices/system/cpu/cpufreq/policy7/scaling_min_freq ${persist.sys.bomb.freq.cpu7_min}
+
+on property:persist.sys.bomb.freq.cpu7_max=*
+    write /sys/devices/system/cpu/cpufreq/policy7/scaling_max_freq ${persist.sys.bomb.freq.cpu7_max}
+
+on property:persist.sys.bomb.freq.gpu_min=*
+    write /sys/class/kgsl/kgsl-3d0/devfreq/min_freq ${persist.sys.bomb.freq.gpu_min}
+    write /sys/class/kgsl/kgsl-3d0/min_gpuclk ${persist.sys.bomb.freq.gpu_min}
+
+on property:persist.sys.bomb.freq.gpu_max=*
+    write /sys/class/kgsl/kgsl-3d0/devfreq/max_freq ${persist.sys.bomb.freq.gpu_max}
+    write /sys/class/kgsl/kgsl-3d0/max_gpuclk ${persist.sys.bomb.freq.gpu_max}
+

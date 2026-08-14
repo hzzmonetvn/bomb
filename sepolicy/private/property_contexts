@@ -7,6 +7,24 @@ persist.sys.bomb.charge.end_threshold u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.charge.disable u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.charge.charging_enabled u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.charge.input_suspend u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu0_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu0_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu1_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu1_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu2_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu2_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu3_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu3_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu4_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu4_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu5_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu5_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu6_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu6_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu7_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.cpu7_max u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.gpu_min u:object_r:bomb_control_prop:s0 exact int
+persist.sys.bomb.freq.gpu_max u:object_r:bomb_control_prop:s0 exact int
 persist.sys.bomb.log.level         u:object_r:bomb_status_prop:s0 exact enum default reduced off
 persist.sys.bomb.selinux_bringup   u:object_r:bomb_status_prop:s0 exact bool
 persist.sys.zk.bomb                u:object_r:bomb_status_prop:s0 exact bool

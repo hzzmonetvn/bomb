@@ -161,15 +161,18 @@ class CapabilityProbe(
             },
         )
         val frequencyCapabilities = frequencyScaling?.capabilities()
+        // The backend's `writable` already means "node present, routable, and
+        // bombd reachable"; ROM mode is added here so a non-integrated install
+        // reports REQUIRES_ROOT rather than SUPPORTED even if bombd is somehow up.
         val cpuFrequencyState = frequencyCapabilityState(
             backendProbed = frequencyCapabilities != null,
             present = frequencyCapabilities?.cpuPresent == true,
-            writable = frequencyCapabilities?.cpuWritable == true,
+            writable = frequencyCapabilities?.cpuWritable == true && integratedMode,
         )
         val gpuFrequencyState = frequencyCapabilityState(
             backendProbed = frequencyCapabilities != null,
             present = frequencyCapabilities?.gpuPresent == true,
-            writable = frequencyCapabilities?.gpuWritable == true,
+            writable = frequencyCapabilities?.gpuWritable == true && integratedMode,
         )
         builder.set(BombCapability.CPU_FREQUENCY_CONTROL, cpuFrequencyState)
         builder.set(BombCapability.GPU_FREQUENCY_CONTROL, gpuFrequencyState)

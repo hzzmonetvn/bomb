@@ -92,12 +92,33 @@ class RomControlPropertyWriter(
     fun requestChargeControl(field: String, value: Int): Boolean {
         return isValidChargeControl(field, value) && client.request("CHARGE $field $value")
     }
+
+    /**
+     * Publish one CPU/GPU frequency-limit write. The APK never writes the cpufreq
+     * or GPU sysfs node; bombd range-checks and sets the matching
+     * `persist.sys.bomb.freq.*` request property, and init performs the write via
+     * its bomb.rc trigger. [field] is a bounded per-policy/GPU control field:
+     *  - `cpu0_min`..`cpu7_max`: per-policy scaling min/max, kHz, 100000..50000000
+     *  - `gpu_min` / `gpu_max`: GPU min/max, Hz, 10000000..3000000000
+     * A [Long] is used because a GPU value in Hz can exceed [Int].
+     */
+    fun requestFrequencyControl(field: String, value: Long): Boolean {
+        return isValidFrequencyControl(field, value) && client.request("FREQ $field $value")
+    }
 }
 
 internal fun isValidChargeControl(field: String, value: Int): Boolean = when (field) {
     "current_max" -> value in 100_000..20_000_000
     "end_threshold" -> value in 0..100
     "disable", "charging_enabled", "input_suspend" -> value in 0..1
+    else -> false
+}
+
+private val CPU_FREQ_FIELD = Regex("^cpu[0-7]_(min|max)$")
+
+internal fun isValidFrequencyControl(field: String, value: Long): Boolean = when {
+    CPU_FREQ_FIELD.matches(field) -> value in 100_000L..50_000_000L
+    field == "gpu_min" || field == "gpu_max" -> value in 10_000_000L..3_000_000_000L
     else -> false
 }
 
@@ -129,7 +150,8 @@ class BombdClient {
             "^(PING|LOG (default|reduced|off) (-1|[0-9]{1,4})|" +
                 "MEM (swappiness|page_cluster) [0-9]{1,3}|" +
                 "CHARGE (current_max [0-9]{1,8}|end_threshold [0-9]{1,3}|" +
-                "(disable|charging_enabled|input_suspend) [01]))$",
+                "(disable|charging_enabled|input_suspend) [01])|" +
+                "FREQ (cpu[0-7]_(min|max) [0-9]{1,8}|gpu_(min|max) [0-9]{1,10}))$",
         )
     }
 }
